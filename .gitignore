@@ -50,3 +50,8 @@ pnpm-debug.log*
 frontend/*.tsbuildinfo
 backend/yolo11n.pt
 backend/test_yelo.py
+# Local development / backup files
+frontend/AGENTS.md
+frontend/CLAUDE.md
+frontend/app/page_backup.tsx
+frontend/public/Profile_Photo.jpeg
