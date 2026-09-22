@@ -7,6 +7,8 @@ from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
+from dotenv import load_dotenv
+import os
 
 
 pwd_context = CryptContext(
@@ -14,8 +16,10 @@ pwd_context = CryptContext(
     deprecated="auto"
 )
 
+load_dotenv()
 
-SECRET_KEY = "change-this-to-a-random-secret"
+
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
