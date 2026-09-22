@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 import secrets
 from pathlib import Path
+from PIL import Image
+from io import BytesIO
 
 from ultralytics import YOLO
 
@@ -100,7 +102,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 def reverse_geocode(latitude: float, longitude: float):
     params = urllib.parse.urlencode({
@@ -249,45 +251,81 @@ def find_duplicate_complaint(
 
 @app.post("/detect-pothole")
 async def detect_pothole(
-    image: UploadFile = File(...)
+    image: UploadFile = File(...),
+    current_user: models.User = Depends(get_current_user)
 ):
     upload_dir = BASE_DIR / "app" / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    file_path = upload_dir / image.filename
+    file_bytes = await image.read()
+
+    allowed_types = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+
+    if image.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail="Only JPEG, PNG, and WEBP images are allowed."
+        )
+
+    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+    if len(file_bytes) > MAX_IMAGE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="Image size must be 5 MB or less."
+        )
+
+    try:
+        image_check = Image.open(BytesIO(file_bytes))
+        image_check.verify()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid image file."
+        )
+
+    safe_filename = f"{secrets.token_hex(16)}_{Path(image.filename).name}"
+    file_path = upload_dir / safe_filename
 
     with open(file_path, "wb") as buffer:
-        buffer.write(await image.read())
-
-    results = yolo_model(
-        str(file_path),
-        conf=0.40
-    )
+        buffer.write(file_bytes)
 
     detections = []
 
-    for result in results:
-        for box in result.boxes:
-            class_id = int(box.cls[0])
-            confidence = float(box.conf[0])
+    try:
+        results = yolo_model(
+            str(file_path),
+            conf=0.40
+        )
 
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
+        for result in results:
+            for box in result.boxes:
 
-            class_name = yolo_model.names[class_id]
+                class_id = int(box.cls[0])
+                confidence = float(box.conf[0])
 
-            detections.append({
-                "class": class_name,
-                "confidence": round(confidence, 3),
-                "bounding_box": {
-                    "x1": round(x1, 2),
-                    "y1": round(y1, 2),
-                    "x2": round(x2, 2),
-                    "y2": round(y2, 2)
-                }
-            })
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-    if file_path.exists():
-        file_path.unlink()
+                class_name = yolo_model.names[class_id]
+
+                detections.append({
+                    "class": class_name,
+                    "confidence": round(confidence, 3),
+                    "bounding_box": {
+                        "x1": round(x1, 2),
+                        "y1": round(y1, 2),
+                        "x2": round(x2, 2),
+                        "y2": round(y2, 2)
+                    }
+                })
+
+    finally:
+        if file_path.exists():
+            file_path.unlink()
 
     potholes = [
         d for d in detections
@@ -300,7 +338,6 @@ async def detect_pothole(
         "pothole_count": len(potholes),
         "detections": detections
     }
-
 
 # =========================
 # REQUEST SCHEMAS
@@ -650,10 +687,40 @@ async def create_complaint(
         # Read image once
         file_bytes = await image.read()
 
+        allowed_types = {
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+        }
+
+        if image.content_type not in allowed_types:
+            raise HTTPException(
+                status_code=400,
+                detail="Only JPEG, PNG, and WEBP images are allowed."
+            )
+
+        MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+        if len(file_bytes) > MAX_IMAGE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail="Image size must be 5 MB or less."
+            )
+
+        try:
+            image_check = Image.open(BytesIO(file_bytes))
+            image_check.verify()
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid image file."
+            )
+
         # Generate image hash for duplicate detection
         image_hash = calculate_image_hash(file_bytes)
 
-        file_path = f"app/uploads/{image.filename}"
+        safe_filename = f"{secrets.token_hex(16)}_{Path(image.filename).name}"
+        file_path = f"app/uploads/{safe_filename}"
 
         with open(file_path, "wb") as buffer:
             buffer.write(file_bytes)
@@ -737,103 +804,113 @@ async def create_complaint(
             priority = "normal"
 
 
-        # =========================
-        # DUPLICATE COMPLAINT CHECK
-        # =========================
+           # =========================
+    # DUPLICATE COMPLAINT CHECK
+    # =========================
 
-        now = datetime.utcnow()
+    now = datetime.utcnow()
 
-        # Check 24-hour restriction
-        if (
-            current_user.duplicate_blocked_until
-            and current_user.duplicate_blocked_until > now
-        ):
-            remaining = (
-                current_user.duplicate_blocked_until - now
+    # Check 24-hour restriction
+    if (
+        current_user.duplicate_blocked_until
+        and current_user.duplicate_blocked_until > now
+    ):
+        remaining = current_user.duplicate_blocked_until - now
+
+        remaining_hours = max(
+            1,
+            int(remaining.total_seconds() // 3600)
+        )
+
+        db.close()
+
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Your account is temporarily restricted because "
+                "of repeated duplicate complaints. "
+                f"Please try again after approximately "
+                f"{remaining_hours} hour(s)."
+            )
+        )
+
+    # Reset duplicate attempts after 24 hours
+    if (
+        current_user.last_duplicate_attempt_at
+        and (
+            now - current_user.last_duplicate_attempt_at
+        ) > timedelta(hours=24)
+    ):
+        current_user.duplicate_attempts = 0
+        current_user.last_duplicate_attempt_at = None
+        db.commit()
+
+    # Find existing duplicate complaint
+    duplicate_complaint = find_duplicate_complaint(
+        db=db,
+        latitude=latitude,
+        longitude=longitude,
+        category=category,
+        image_hash=image_hash
+    )
+
+    print(
+        "DUPLICATE DEBUG:",
+        "user=", current_user.id,
+        "lat=", latitude,
+        "lon=", longitude,
+        "category=", repr(category),
+        "image_hash=", image_hash
+    )
+
+    print(
+        "DUPLICATE FOUND:",
+        duplicate_complaint.id if duplicate_complaint else None
+    )
+
+    if duplicate_complaint:
+
+        current_user.duplicate_attempts += 1
+        current_user.last_duplicate_attempt_at = now
+
+        attempts = current_user.duplicate_attempts
+        duplicate_complaint_id = duplicate_complaint.id
+
+        # 4th duplicate attempt = 24-hour restriction
+        if attempts > DUPLICATE_ATTEMPT_LIMIT:
+
+            current_user.duplicate_blocked_until = (
+                now + timedelta(hours=DUPLICATE_BLOCK_HOURS)
             )
 
-            remaining_hours = max(
-                1,
-                int(remaining.total_seconds() // 3600)
-            )
-
+            db.commit()
             db.close()
 
             raise HTTPException(
                 status_code=429,
                 detail=(
-                    "Your account is temporarily restricted because "
-                    "of repeated duplicate complaints. "
-                    f"Please try again after approximately "
-                    f"{remaining_hours} hour(s)."
+                    "Repeated duplicate complaint attempts detected. "
+                    "Your account has been restricted for 24 hours."
                 )
             )
 
+        db.commit()
+        db.close()
 
-        # Reset duplicate attempts after 24 hours
-        if (
-            current_user.last_duplicate_attempt_at
-            and (
-                now - current_user.last_duplicate_attempt_at
-            ) > timedelta(hours=24)
-        ):
-            current_user.duplicate_attempts = 0
-            current_user.last_duplicate_attempt_at = None
-            db.commit()
-
-
-        # Find existing duplicate complaint
-        duplicate_complaint = find_duplicate_complaint(
-            db=db,
-            latitude=latitude,
-            longitude=longitude,
-            category=category,
-            image_hash=image_hash
+        remaining_attempts = (
+            DUPLICATE_ATTEMPT_LIMIT - attempts
         )
 
-        if duplicate_complaint:
-
-            current_user.duplicate_attempts += 1
-            current_user.last_duplicate_attempt_at = now
-
-            attempts = current_user.duplicate_attempts
-            duplicate_complaint_id = duplicate_complaint.id
-
-            # 4th duplicate attempt = 24-hour restriction
-            if attempts > DUPLICATE_ATTEMPT_LIMIT:
-
-                current_user.duplicate_blocked_until = (
-                    now + timedelta(hours=DUPLICATE_BLOCK_HOURS)
-                )
-
-                db.commit()
-                db.close()
-
-                raise HTTPException(
-                    status_code=429,
-                    detail=(
-                        "Repeated duplicate complaint attempts detected. "
-                        "Your account has been restricted for 24 hours."
-                    )
-                )
-
-            db.commit()
-            db.close()
-
-            remaining_attempts = (
-                DUPLICATE_ATTEMPT_LIMIT - attempts
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A similar complaint already exists "
+                f"(Complaint #{duplicate_complaint_id}). "
+                f"Duplicate attempt {attempts} detected. "
+                f"You have {remaining_attempts} duplicate "
+                f"attempt(s) remaining before a 24-hour restriction."
             )
-
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"A similar complaint already exists "
-                    f"(Complaint #{duplicate_complaint_id}). "
-                    f"Duplicate attempt {attempts} detected. "
-                    f"You have {remaining_attempts} duplicate "
-                    f"attempt(s) remaining before a 24-hour restriction."
-                )
-            )
+        )
 
      # =========================
     # CREATE COMPLAINT RECORD
@@ -908,9 +985,6 @@ def get_complaints(
             status_code=401,
             detail="Unauthorized"
         )
-
-    print("DEBUG USER ID:", current_user.id)
-    print("DEBUG USER ROLE:", current_user.role)
 
     if current_user.role == "admin":
         complaints = (
@@ -1980,51 +2054,6 @@ def record_action_taken(
     }
 
 # =========================
-# UPDATE COMPLAINT
-# =========================
-
-@app.put("/complaints/{complaint_id}")
-def update_complaint(
-    complaint_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    if current_user is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-    complaint = (
-        db.query(models.Complaint)
-        .filter(models.Complaint.id == complaint_id)
-        .first()
-    )
-
-    if complaint is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint not found"
-        )
-
-    if complaint.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to update this complaint"
-        )
-
-    complaint.updated_at = datetime.now(timezone.utc)
-
-    db.commit()
-    db.refresh(complaint)
-
-    return {
-        "message": "Complaint updated successfully",
-        "complaint_id": complaint.id,
-        "updated_at": to_ist(complaint.updated_at)
-    }
-
-# =========================
 # DELETE COMPLAINT
 # =========================
 
@@ -2052,10 +2081,16 @@ def delete_complaint(
             detail="Complaint not found"
         )
 
-    if complaint.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(
+        if complaint.user_id != current_user.id and current_user.role != "admin":
+            raise HTTPException(
             status_code=403,
             detail="You are not authorized to delete this complaint"
+        )
+
+    if complaint.status in ["resolved", "rejected"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Resolved or rejected complaints cannot be deleted"
         )
 
     db.delete(complaint)
@@ -2153,6 +2188,7 @@ def login_for_swagger(
 class ForgotPasswordRequest(BaseModel):
     email: str
 
+
 @app.post("/forgot-password")
 def forgot_password(
     data: ForgotPasswordRequest,
@@ -2168,16 +2204,30 @@ def forgot_password(
             "message": "If the email exists, a password reset link has been sent."
         }
 
+    # Invalidate previous unused reset tokens for this user
+    db.query(models.PasswordResetToken).filter(
+        models.PasswordResetToken.user_id == user.id,
+        models.PasswordResetToken.used == False
+    ).update(
+        {"used": True},
+        synchronize_session=False
+    )
+
     # Generate secure random token
     reset_token = secrets.token_urlsafe(32)
+
+    # Store only hashed token in database
+    reset_token_hash = hashlib.sha256(
+        reset_token.encode()
+    ).hexdigest()
 
     # Token valid for 15 minutes
     expires_at = datetime.utcnow() + timedelta(minutes=15)
 
-    # Save token in database
+    # Save hashed token in database
     password_reset = models.PasswordResetToken(
         user_id=user.id,
-        token=reset_token,
+        token=reset_token_hash,
         expires_at=expires_at,
         used=False
     )
@@ -2186,9 +2236,18 @@ def forgot_password(
     db.commit()
     db.refresh(password_reset)
 
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    frontend_url = os.getenv(
+        "FRONTEND_URL",
+        "http://localhost:3000"
+    ).rstrip("/")
+
+    # Raw token goes only into the email link
     reset_link = f"{frontend_url}/reset-password?token={reset_token}"
-    from_email = os.getenv("FROM_EMAIL", "CivicPulse AI <onboarding@resend.dev>")
+
+    from_email = os.getenv(
+        "FROM_EMAIL",
+        "CivicPulse AI <onboarding@resend.dev>"
+    )
 
     # Send email using Resend
     try:
@@ -2198,16 +2257,31 @@ def forgot_password(
             "subject": "CivicPulse AI - Password Reset",
             "html": f"""
                 <h2>CivicPulse AI</h2>
+
                 <p>Hello {user.name},</p>
-                <p>We received a request to reset your CivicPulse AI password.</p>
+
+                <p>
+                    We received a request to reset your
+                    CivicPulse AI password.
+                </p>
+
                 <p>
                     <a href="{reset_link}">
                         Reset Password
                     </a>
                 </p>
-                <p>This link will expire in 15 minutes.</p>
+
+                <p>
+                    This link will expire in 15 minutes.
+                </p>
+
+                <p>
+                    If you did not request a password reset,
+                    you can safely ignore this email.
+                </p>
             """
         })
+
     except Exception as e:
         db.delete(password_reset)
         db.commit()
@@ -2220,8 +2294,8 @@ def forgot_password(
         )
 
     return {
-            "message": "If the email exists, a password reset link has been sent."
-        }
+        "message": "If the email exists, a password reset link has been sent."
+    }
     # =========================================================
 # RESET PASSWORD
 # =========================================================
@@ -2243,11 +2317,16 @@ def reset_password(
             detail="Password must be at least 8 characters."
         )
 
+    # Hash received reset token before database lookup
+    token_hash = hashlib.sha256(
+        data.token.encode()
+    ).hexdigest()
+
     # Find reset token
     reset_record = db.query(
         models.PasswordResetToken
     ).filter(
-        models.PasswordResetToken.token == data.token
+        models.PasswordResetToken.token == token_hash
     ).first()
 
     # Token not found
@@ -2282,6 +2361,13 @@ def reset_password(
             detail="User account not found."
         )
 
+    # Prevent setting the same password again
+    if verify_password(data.new_password, user.password):
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from your current password."
+        )
+
     # Hash new password
     user.password = hash_password(data.new_password)
 
@@ -2293,7 +2379,6 @@ def reset_password(
     return {
         "message": "Password reset successfully. You can now login with your new password."
     }
-
     # =========================
 # CREATE NOTIFICATION HELPER
 # =========================
