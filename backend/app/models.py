@@ -137,29 +137,25 @@ class Complaint(Base):
     )
 
     address = Column(
-        String,
-        nullable=True
+    String,
+    nullable=True
     )
 
-    road = Column(
-        String,
-        nullable=True
+    landmark = Column(
+    String,
+    nullable=True
     )
 
-    city = Column(
-        String,
-        nullable=True
-    )
 
-    state = Column(
-        String,
-        nullable=True
-    )
+    road = Column(String, nullable=True)
 
-    country = Column(
-        String,
-        nullable=True
-    )
+# Nearest road details
+    road_type = Column(String, nullable=True)
+    road_distance_m = Column(Float, nullable=True)
+
+    city = Column(String, nullable=True)
+    state = Column(String, nullable=True)
+    country = Column(String, nullable=True)
 
     image_url = Column(
         String,
