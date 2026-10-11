@@ -1,354 +1,480 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState, useRef, useEffect } from "react";
-export default function CitizenComplaint() {
-  const router = useRouter();
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import dynamic from "next/dynamic";
+const LocationPicker = dynamic(
+  () => import("@/components/LocationPicker"),
+  { ssr: false }
+);
 
-  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+
+
+type Complaint = {
+  id: number;
+  user_id?: number | null;
+  title: string;
+  description?: string | null;
+  category?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  address?: string | null;
+  road?: string | null;
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+  image_url?: string | null;
+  status: string;
+  priority?: string | null;
+  pothole_count?: number | null;
+  ai_confidence?: number | null;
+  department?: string | null;
+  assigned_to?: number | null;
+  rejection_reason?: string | null;
+  action_taken?: string | null;
+  verified_at?: string | null;
+  department_assigned_at?: string | null;
+  officer_assigned_at?: string | null;
+  in_progress_at?: string | null;
+  action_taken_at?: string | null;
+  resolved_at?: string | null;
+  feedback?: { id: number; rating: number; comment?: string | null; user_id: number; created_at: string }[];
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+type Notification = {
+  id: number;
+  complaint_id?: number | null;
+  message: string;
+  type?: string;
+  is_read: boolean;
+  created_at: string;
+};
+
+type Section =
+  | "dashboard"
+  | "submit"
+  | "complaints"
+  | "notifications"
+  | "profile";
+
+const API_BASE_URL = "http://127.0.0.1:8000";
+
+function statusClass(status?: string | null) {
+  switch ((status || "").toLowerCase().replace(/-/g, "_")) {
+    case "pending":
+      return "bg-yellow-100 text-yellow-700";
+    case "verified":
+      return "bg-blue-100 text-blue-700";
+    case "assigned":
+      return "bg-purple-100 text-purple-700";
+    case "in_progress":
+      return "bg-orange-100 text-orange-700";
+    case "action_taken":
+      return "bg-indigo-100 text-indigo-700";
+    case "resolved":
+      return "bg-green-100 text-green-700";
+    case "rejected":
+      return "bg-red-100 text-red-700";
+    default:
+      return "bg-slate-100 text-slate-700";
+  }
+}
+
+function formatStatus(status?: string | null) {
+  if (!status) return "Unknown";
+
+  return status
+    .replace(/_/g, " ")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatDate(date?: string | null) {
+  if (!date) return "Not available";
+
+  const d = new Date(date);
+
+  if (Number.isNaN(d.getTime())) {
+    return date;
+  }
+
+  return d.toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function getImageUrl(imageUrl?: string | null) {
+  if (!imageUrl) return null;
+
+  if (
+    imageUrl.startsWith("http://") ||
+    imageUrl.startsWith("https://")
+  ) {
+    return imageUrl;
+  }
+
+  let clean = imageUrl.replace(/\\/g, "/");
+
+  clean = clean.replace(/^\/+/, "");
+  clean = clean.replace(/^app\/+/i, "");
+  clean = clean.replace(/^uploads\/+/i, "");
+
+  return `${API_BASE_URL}/uploads/${clean}`;
+}
+
+export default function CitizenDashboard() {
+  const [activeSection, setActiveSection] =
+    useState<Section>("dashboard");
+
+  const [mobileMenuOpen, setMobileMenuOpen] =
+    useState(false);
+
+  const [complaints, setComplaints] =
+    useState<Complaint[]>([]);
+
+  const [notifications, setNotifications] =
+    useState<Notification[]>([]);
+
+  const [loading, setLoading] = useState(true);
+
+  const [expandedId, setExpandedId] =
+    useState<number | null>(null);
+
+  const [feedbackDrafts, setFeedbackDrafts] = useState<Record<number, { rating: number; comment: string }>>({});
+  const [feedbackSubmittingId, setFeedbackSubmittingId] = useState<number | null>(null);
+  const [feedbackMessages, setFeedbackMessages] = useState<Record<number, { type: "success" | "error"; text: string }>>({});
+
+  /* =====================================================
+     USER
+  ===================================================== */
+
+  const [user, setUser] = useState<{
+    id: number;
+    name: string;
+    email: string;
+    role: string;
+  } | null>(null);
+
+  /* =====================================================
+     COMPLAINT FORM
+  ===================================================== */
+
   const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [category, setCategory] = useState("Road Damage");
-  const [image, setImage] = useState<File | null>(null);
+  const [description, setDescription] =
+    useState("");
 
-  const [latitude, setLatitude] = useState<number | null>(null);
-  const [longitude, setLongitude] = useState<number | null>(null);
+  const [category, setCategory] =
+    useState("Road Damage");
 
-  const [locationLoading, setLocationLoading] = useState(false);
-  const [locationError, setLocationError] = useState("");
+  const [image, setImage] =
+    useState<File | null>(null);
 
-  const [road, setRoad] = useState("");
+  const [landmark, setLandmark] =
+    useState("");
 
-  const [city, setCity] = useState("");
+  /* =====================================================
+     LOCATION
+  ===================================================== */
 
-  const [state, setState] = useState("");
+  const [latitude, setLatitude] =
+    useState<number | null>(null);
 
-  const [address, setAddress] = useState("");
+  const [longitude, setLongitude] =
+    useState<number | null>(null);
 
-  const [myComplaints, setMyComplaints] = useState<any[]>([]);
+  const [address, setAddress] =
+    useState("");
 
-  const [loadingComplaints, setLoadingComplaints] = useState(false);
-  const [feedbackRating, setFeedbackRating] = useState<
-    Record<number, number>
-  >({});
+  const [road, setRoad] =
+    useState("");
 
-  const [feedbackMessage, setFeedbackMessage] = useState<
-    Record<number, string>
-  >({});
-  const [submittedFeedback, setSubmittedFeedback] = useState<
-    Record<number, boolean>
-  >({});
-  const fetchMyComplaints = async () => {
+  const [roadType, setRoadType] =
+    useState("");
+
+  const [roadDistance, setRoadDistance] =
+    useState<number | null>(null);
+
+  const [city, setCity] =
+    useState("");
+
+  const [state, setState] =
+    useState("");
+
+  const [locationLoading, setLocationLoading] =
+    useState(false);
+
+  const [locationError, setLocationError] =
+    useState("");
+
+  /* =====================================================
+     SUBMIT
+  ===================================================== */
+
+  const [submitting, setSubmitting] =
+    useState(false);
+
+  const [submitMessage, setSubmitMessage] =
+    useState("");
+
+  const [submitError, setSubmitError] =
+    useState("");
+
+  /* =====================================================
+     VOICE
+  ===================================================== */
+
+  const [listeningField, setListeningField] =
+    useState<"title" | "description" | null>(
+      null
+    );
+
+  const recognitionRef = useRef<any>(null);
+
+  /* =====================================================
+     TOKEN
+  ===================================================== */
+
+  const getToken = () => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    return localStorage.getItem(
+      "access_token"
+    );
+  };
+
+  /* =====================================================
+     FETCH CURRENT USER
+  ===================================================== */
+
+  const fetchCurrentUser = async () => {
+    const token = getToken();
+
+    if (!token) {
+      window.location.href = "/login";
+      return;
+    }
 
     try {
-
-      setLoadingComplaints(true);
-
-      const token = localStorage.getItem("access_token");
-
-      if (!token) {
-        return;
-      }
-
       const response = await fetch(
-        "http://127.0.0.1:8000/complaints",
+        `${API_BASE_URL}/me`,
         {
           method: "GET",
           headers: {
             Authorization: `Bearer ${token}`,
+            Accept: "application/json",
           },
+          cache: "no-store",
         }
       );
+
+      if (response.status === 401) {
+        localStorage.removeItem(
+          "access_token"
+        );
+
+        window.location.href = "/login";
+        return;
+      }
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(
-          data.detail || "Failed to load complaints."
+        console.error(
+          "Failed to fetch user:",
+          data
         );
+        return;
+      }
+      if (data.role !== "citizen") {
+        window.location.href = "/";
+
+        return;
       }
 
-      setMyComplaints(
-        Array.isArray(data) ? data : data.complaints || []
+      setUser(data);
+    } catch (error) {
+      console.error(
+        "Current user error:",
+        error
+      );
+    }
+  };
+
+  /* =====================================================
+     FETCH COMPLAINTS
+  ===================================================== */
+
+  const fetchComplaints = async () => {
+    const token = getToken();
+
+    if (!token) {
+      setComplaints([]);
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/complaints`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json",
+          },
+          cache: "no-store",
+        }
       );
 
-      console.log("My Complaints API Response:", data);
+      if (response.status === 401) {
+        localStorage.removeItem(
+          "access_token"
+        );
 
+        window.location.href = "/login";
+        return;
+      }
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        console.error(
+          "Complaint fetch failed:",
+          data
+        );
+
+        setComplaints([]);
+        return;
+      }
+
+      const result = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.complaints)
+          ? data.complaints
+          : [];
+
+      setComplaints(result);
     } catch (error) {
-
       console.error(
-        "Failed to fetch complaints:",
+        "Complaint fetch error:",
         error
       );
 
-    } finally {
-
-      setLoadingComplaints(false);
-
+      setComplaints([]);
     }
-
   };
 
+  /* =====================================================
+     SUBMIT CITIZEN FEEDBACK
+  ===================================================== */
 
-  useEffect(() => {
-    fetchMyComplaints();
-  }, []);
-
-
-  const [submitting, setSubmitting] = useState(false);
-  const [message, setMessage] = useState("");
-  const [submittedComplaintId, setSubmittedComplaintId] =
-    useState<number | null>(null);
-  const [isListening, setIsListening] = useState(false);
-  const [voiceTarget, setVoiceTarget] = useState<
-    "title" | "description" | null
-  >(null);
-  const [voiceLanguage, setVoiceLanguage] = useState("hi-IN");
-
-  const startVoiceInput = (
-    target: "title" | "description"
-  ) => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      setMessage(
-        "Voice input is not supported in this browser."
-      );
+  const submitFeedback = async (complaint: Complaint) => {
+    const token = getToken();
+    const draft = feedbackDrafts[complaint.id] || { rating: 5, comment: "" };
+    if (!token) {
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "error", text: "Please log in again to submit feedback." } }));
       return;
     }
-
-    const recognition = new SpeechRecognition();
-
-    recognition.lang = voiceLanguage;
-    recognition.interimResults = false;
-    recognition.continuous = false;
-
-    setVoiceTarget(target);
-    setIsListening(true);
-    setMessage("");
-
-    recognition.onresult = (event: any) => {
-      const text = event.results[0][0].transcript;
-
-      if (target === "title") {
-        setTitle(text);
-      } else {
-        setDescription(text);
-      }
-    };
-
-    recognition.onerror = () => {
-      setMessage("Voice input failed. Please try again.");
-      setIsListening(false);
-      setVoiceTarget(null);
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-      setVoiceTarget(null);
-    };
-
-    recognition.start();
+    if (draft.rating < 1 || draft.rating > 5) {
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "error", text: "Please select a rating from 1 to 5." } }));
+      return;
+    }
+    setFeedbackSubmittingId(complaint.id);
+    setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "success", text: "Submitting feedback..." } }));
+    try {
+      const response = await fetch(`${API_BASE_URL}/complaints/${complaint.id}/feedback`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ rating: draft.rating, comment: draft.comment.trim() || null }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Could not submit feedback.");
+      const newFeedback = { id: data.feedback_id, rating: data.rating, comment: data.comment, user_id: user?.id ?? 0, created_at: data.created_at };
+      setComplaints((prev) => prev.map((item) => item.id === complaint.id ? { ...item, feedback: [...(item.feedback || []), newFeedback] } : item));
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "success", text: "Thank you! Your feedback has been submitted." } }));
+    } catch (error) {
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "error", text: error instanceof Error ? error.message : "Could not submit feedback." } }));
+    } finally {
+      setFeedbackSubmittingId(null);
+    }
   };
 
-  const getComplaintTimeline = (complaint: any) => {
-    const timeline = [
-      {
-        label: "Submitted",
-        date: complaint.created_at,
-        completed: !!complaint.created_at,
-      },
-      {
-        label: "Verified",
-        date: complaint.verified_at,
-        completed: !!complaint.verified_at,
-      },
-      {
-        label: "Department Assigned",
-        date: complaint.department_assigned_at,
-        completed: !!complaint.department_assigned_at,
-      },
-      {
-        label: "Officer Assigned",
-        date: complaint.officer_assigned_at,
-        completed: !!complaint.officer_assigned_at,
-      },
-      {
-        label: "In Progress",
-        date: complaint.in_progress_at,
-        completed: !!complaint.in_progress_at,
-      },
-      {
-        label: "Action Taken",
-        date: complaint.action_taken_at,
-        completed: !!complaint.action_taken_at,
-      },
-      {
-        label: "Resolved",
-        date: complaint.resolved_at,
-        completed: !!complaint.resolved_at,
-      },
-    ];
+  /* =====================================================
+     FETCH NOTIFICATIONS
+  ===================================================== */
 
-    return timeline;
-  };
+  const fetchNotifications = async () => {
+    const token = getToken();
 
-  const submitFeedback = async (complaintId: number) => {
-    const rating = feedbackRating[complaintId];
-
-    if (!rating) {
-      setFeedbackMessage((prev) => ({
-        ...prev,
-        [complaintId]: "Please select a rating first.",
-      }));
+    if (!token) {
+      setNotifications([]);
       return;
     }
 
     try {
-      const token = localStorage.getItem("access_token");
-
-      if (!token) {
-        setFeedbackMessage((prev) => ({
-          ...prev,
-          [complaintId]: "Please login again.",
-        }));
-        return;
-      }
-
       const response = await fetch(
-        `http://127.0.0.1:8000/complaints/${complaintId}/feedback`,
+        `${API_BASE_URL}/notifications`,
         {
-          method: "POST",
+          method: "GET",
           headers: {
-            "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
+            Accept: "application/json",
           },
-          body: JSON.stringify({
-            rating: rating,
-          }),
+          cache: "no-store",
         }
       );
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        setFeedbackMessage((prev) => ({
-          ...prev,
-          [complaintId]:
-            data.detail || "Failed to submit feedback.",
-        }));
+      if (response.status === 401) {
         return;
       }
 
-      setFeedbackMessage((prev) => ({
-        ...prev,
-        [complaintId]: "Feedback submitted successfully.",
-      }));
-
-      setFeedbackRating((prev) => {
-        const updated = { ...prev };
-        delete updated[complaintId];
-        return updated;
-      });
-
-      setSubmittedFeedback((prev) => ({
-        ...prev,
-        [complaintId]: true,
-      }));
-
-    } catch (error) {
-      console.error("Feedback submission failed:", error);
-
-      setFeedbackMessage((prev) => ({
-        ...prev,
-        [complaintId]:
-          "Something went wrong. Please try again.",
-      }));
-    }
-  };
-  // =========================
-  // BIHAR TEST LOCATION
-  // DEVELOPMENT ONLY
-  // =========================
-
-  const setBiharTestLocation = async () => {
-    if (window.location.hostname !== "localhost") {
-      return;
-    }
-
-    const lat = 26.806594;
-    const lon = 84.510134;
-
-    setLatitude(lat);
-    setLongitude(lon);
-    setLocationError("");
-    setMessage("");
-    setLocationLoading(true);
-
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&addressdetails=1&accept-language=en`
-      );
+      const data = await response.json();
 
       if (!response.ok) {
-        throw new Error("Bihar test location lookup failed");
+        console.error(
+          "Notification fetch failed:",
+          data
+        );
+
+        setNotifications([]);
+        return;
       }
 
-      const data = await response.json();
-      const location = data.address || {};
+      const result = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.notifications)
+          ? data.notifications
+          : [];
 
-      setRoad(
-        location.road ||
-        location.street ||
-        location.highway ||
-        location.road_name ||
-        "Road name unavailable"
-      );
-
-      setCity(
-        location.city ||
-        location.town ||
-        location.village ||
-        location.municipality ||
-        location.city_district ||
-        location.suburb ||
-        location.district ||
-        location.state_district ||
-        location.county ||
-        "City not found"
-      );
-
-      setState(
-        location.state ||
-        "Bihar"
-      );
-
-      setAddress(
-        data.display_name ||
-        `${lat}, ${lon}`
-      );
-
+      setNotifications(result);
     } catch (error) {
-      console.error("Bihar test location error:", error);
+      console.error(
+        "Notification fetch error:",
+        error
+      );
 
-      setRoad("Test Road");
-      setCity("Bettiah");
-      setState("Bihar");
-      setAddress("Bettiah, West Champaran, Bihar, India");
-
-    } finally {
-      setLocationLoading(false);
+      setNotifications([]);
     }
   };
 
-  // =========================
-  // GET CURRENT LOCATION
-  // =========================
+  /* =====================================================
+     AUTOMATIC LOCATION
+  ===================================================== */
 
-  const getCurrentLocation = () => {
-    if (!navigator.geolocation) {
+  const detectLocation = () => {
+    if (
+      typeof window === "undefined" ||
+      !navigator.geolocation
+    ) {
       setLocationError(
         "Geolocation is not supported by this browser."
       );
@@ -357,60 +483,78 @@ export default function CitizenComplaint() {
 
     setLocationLoading(true);
     setLocationError("");
-    setMessage("");
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        const lat = position.coords.latitude;
-        const lon = position.coords.longitude;
+        const lat =
+          position.coords.latitude;
+
+        const lng =
+          position.coords.longitude;
 
         setLatitude(lat);
-        setLongitude(lon);
+        setLongitude(lng);
 
         try {
           const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&addressdetails=1&accept-language=en`
+            `${API_BASE_URL}/reverse-geocode?latitude=${lat}&longitude=${lng}`,
+            {
+              method: "GET",
+              cache: "no-store",
+            }
           );
 
-          if (!response.ok) {
-            throw new Error("Location lookup failed");
+          let data: any = null;
+
+          try {
+            data = await response.json();
+          } catch {
+            data = null;
           }
 
-          const data = await response.json();
-          const location = data.address || {};
+          if (!response.ok) {
+            throw new Error(
+              data?.detail ||
+              "Unable to fetch location details."
+            );
+          }
 
-          const detectedRoad =
-            location.road ||
-            location.street ||
-            location.highway ||
-            location.road_name ||
-            location.residential ||
-            "Road name unavailable";
+          setAddress(
+            data?.display_name || ""
+          );
 
-          const detectedCity =
-            location.city ||
-            location.town ||
-            location.village ||
-            location.municipality ||
-            location.city_district ||
-            location.suburb ||
-            location.district ||
-            location.state_district ||
-            location.county ||
-            "City not found";
+          setRoad(
+            data?.road || ""
+          );
 
-          const detectedState =
-            location.state ||
-            "State not found";
+          setRoadType(
+            data?.road_type || ""
+          );
 
-          const detectedAddress =
-            data.display_name ||
-            `${lat}, ${lon}`;
+          setRoadDistance(
+            data?.road_distance_m ?? null
+          );
 
-          setRoad(detectedRoad);
-          setCity(detectedCity);
-          setState(detectedState);
-          setAddress(detectedAddress);
+          setCity(
+            data?.city || ""
+          );
+
+          setState(
+            data?.state || ""
+          );
+
+          console.log(
+            "Location detected:",
+            {
+              latitude: lat,
+              longitude: lng,
+              address:
+                data?.display_name,
+              road: data?.road,
+              city: data?.city,
+              state: data?.state,
+            }
+          );
         } catch (error) {
           console.error(
             "Reverse geocoding error:",
@@ -418,20 +562,17 @@ export default function CitizenComplaint() {
           );
 
           setLocationError(
-            "Location found, but address could not be detected."
+            "GPS detected, but address details could not be fetched."
           );
         } finally {
           setLocationLoading(false);
         }
       },
-
       (error) => {
         console.error(
-          "Geolocation error:",
+          "Location error:",
           error
         );
-
-        setLocationLoading(false);
 
         if (error.code === 1) {
           setLocationError(
@@ -439,19 +580,20 @@ export default function CitizenComplaint() {
           );
         } else if (error.code === 2) {
           setLocationError(
-            "Unable to detect your location."
+            "Unable to determine your location."
           );
         } else if (error.code === 3) {
           setLocationError(
-            "Location request timed out."
+            "Location request timed out. Please try again."
           );
         } else {
           setLocationError(
-            "Unable to detect location."
+            "Unable to detect your location."
           );
         }
-      },
 
+        setLocationLoading(false);
+      },
       {
         enableHighAccuracy: true,
         timeout: 15000,
@@ -460,35 +602,232 @@ export default function CitizenComplaint() {
     );
   };
 
-  // =========================
-  // SUBMIT COMPLAINT
-  // =========================
+  /* =====================================================
+     AUTO DETECT WHEN SUBMIT PAGE OPENS
+  ===================================================== */
 
-  const handleSubmit = async (
-    e: React.FormEvent
+  useEffect(() => {
+    if (
+      activeSection === "submit" &&
+      latitude === null &&
+      longitude === null &&
+      !locationLoading
+    ) {
+      detectLocation();
+    }
+  }, [activeSection]);
+
+  /* =====================================================
+     VOICE INPUT
+  ===================================================== */
+
+  const startVoiceInput = (
+    field: "title" | "description"
+  ) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setSubmitError(
+        "Voice input is not supported. Please use Google Chrome."
+      );
+      return;
+    }
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch { }
+    }
+
+    const recognition =
+      new SpeechRecognition();
+
+    recognition.lang = "en-IN";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognitionRef.current =
+      recognition;
+
+    setListeningField(field);
+    setSubmitError("");
+
+    recognition.onresult = (
+      event: any
+    ) => {
+      const text =
+        event?.results?.[0]?.[0]
+          ?.transcript || "";
+
+      if (!text) return;
+
+      if (field === "title") {
+        setTitle((old) =>
+          old
+            ? `${old} ${text}`
+            : text
+        );
+      } else {
+        setDescription((old) =>
+          old
+            ? `${old} ${text}`
+            : text
+        );
+      }
+    };
+
+    recognition.onerror = () => {
+      setSubmitError(
+        "Unable to capture voice. Please allow microphone access."
+      );
+
+      setListeningField(null);
+      recognitionRef.current = null;
+    };
+
+    recognition.onend = () => {
+      setListeningField(null);
+      recognitionRef.current = null;
+    };
+
+    try {
+      recognition.start();
+    } catch (error) {
+      console.error(
+        "Voice start error:",
+        error
+      );
+
+      setListeningField(null);
+    }
+  };
+
+
+  const handleMapLocationSelect = async (
+    lat: number,
+    lng: number
+  ) => {
+    // Invalid coordinates reject karo.
+    if (
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      lat < 6.5 ||
+      lat > 37.6 ||
+      lng < 68 ||
+      lng > 97.5
+    ) {
+      setLocationError(
+        "Please select a valid location within India."
+      );
+      return;
+    }
+
+    setLatitude(lat);
+    setLongitude(lng);
+    setLocationError("");
+    setLocationLoading(true);
+
+    // Purana address clear karo, taaki galat address na dikhe.
+    setAddress("");
+    setRoad("");
+    setRoadType("");
+    setRoadDistance(null);
+    setCity("");
+    setState("");
+
+    try {
+      const params = new URLSearchParams({
+        latitude: String(lat),
+        longitude: String(lng),
+      });
+
+      const response = await fetch(
+        `${API_BASE_URL}/reverse-geocode?${params.toString()}`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Address lookup failed: ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      if (
+        !data ||
+        typeof data !== "object" ||
+        !data.display_name
+      ) {
+        throw new Error("Address not found for these coordinates.");
+      }
+
+      setAddress(data.display_name);
+      setRoad(data.road || "");
+      setRoadType(data.road_type || "");
+      setRoadDistance(data.road_distance_m ?? null);
+      setCity(data.city || "");
+      setState(data.state || "");
+    } catch (error) {
+      console.error("Map location lookup failed:", error);
+
+      setLocationError(
+        "Coordinates selected, but address lookup failed. Please try again."
+      );
+    } finally {
+      setLocationLoading(false);
+    }
+  };
+
+
+  /* =====================================================
+     SUBMIT COMPLAINT
+  ===================================================== */
+
+  const handleComplaintSubmit = async (
+    e: FormEvent<HTMLFormElement>
   ) => {
     e.preventDefault();
 
-    setMessage("");
+    setSubmitMessage("");
+    setSubmitError("");
 
     if (!title.trim()) {
-      setMessage("Please enter complaint title.");
+      setSubmitError(
+        "Please enter complaint title or use the voice button."
+      );
       return;
     }
 
     if (!description.trim()) {
-      setMessage(
-        "Please enter complaint description."
+      setSubmitError(
+        "Please enter complaint description or use the voice button."
       );
       return;
     }
+
 
     if (
       latitude === null ||
       longitude === null
     ) {
-      setMessage(
-        "Please detect your location before submitting."
+      setSubmitError(
+        "Please select the complaint location on the map or detect your location before submitting."
+      );
+      return;
+    }
+
+
+    const token = getToken();
+
+    if (!token) {
+      setSubmitError(
+        "Session expired. Please login again."
       );
       return;
     }
@@ -496,100 +835,146 @@ export default function CitizenComplaint() {
     try {
       setSubmitting(true);
 
-      const formData = new FormData();
+      const formData =
+        new FormData();
 
-      formData.append("title", title);
+      formData.append(
+        "title",
+        title.trim()
+      );
+
       formData.append(
         "description",
-        description
+        description.trim()
       );
-      formData.append("category", category);
+
+      formData.append(
+        "category",
+        category
+      );
+
       formData.append(
         "latitude",
-        latitude.toString()
+        String(latitude)
       );
+
       formData.append(
         "longitude",
-        longitude.toString()
+        String(longitude)
       );
-      formData.append("address", address);
 
-      if (image) {
-        formData.append("image", image);
+      formData.append(
+        "address",
+        address.trim()
+      );
+
+      formData.append(
+        "landmark",
+        landmark.trim()
+      );
+
+      if (road) {
+        formData.append(
+          "road",
+          road
+        );
       }
 
-      const token =
-        localStorage.getItem(
-          "access_token"
+      if (city) {
+        formData.append(
+          "city",
+          city
         );
+      }
+
+      if (state) {
+        formData.append(
+          "state",
+          state
+        );
+      }
+
+      if (image) {
+        formData.append(
+          "image",
+          image
+        );
+      }
 
       const response = await fetch(
-        "http://127.0.0.1:8000/complaints",
+        `${API_BASE_URL}/complaints`,
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${token}`,
+            Authorization:
+              `Bearer ${token}`,
           },
           body: formData,
         }
       );
 
-      const data = await response.json();
+      let data: any = null;
+
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
 
       console.log(
-        "COMPLAINT CREATED:",
+        "Complaint submission response:",
         data
       );
 
+      if (response.status === 401) {
+        localStorage.removeItem(
+          "access_token"
+        );
+
+        window.location.href =
+          "/login";
+
+        return;
+      }
+
       if (!response.ok) {
         throw new Error(
-          data.detail ||
-          data.message ||
+          data?.detail ||
+          data?.message ||
           "Complaint submission failed."
         );
       }
 
-      // =========================
-      // GET COMPLAINT ID SAFELY
-      // =========================
-
       const complaintId =
-        data.complaint_id ??
-        data.id ??
-        data.complaint?.id;
+        data?.complaint_id ??
+        data?.id ??
+        data?.complaint?.id;
 
-      if (
-        complaintId !== undefined &&
-        complaintId !== null
-      ) {
-        setSubmittedComplaintId(Number(complaintId));
+      setSubmitMessage(
+        complaintId
+          ? `Complaint submitted successfully! Complaint #${complaintId}`
+          : "Complaint submitted successfully!"
+      );
 
-        setMessage(
-          `Complaint submitted successfully! Complaint #${complaintId}`
-        );
-      } else {
-        setMessage(
-          "Complaint submitted successfully!"
-        );
-
-        console.warn(
-          "Complaint ID was not returned by backend:",
-          data
-        );
-      }
-
-      // Clear form
       setTitle("");
       setDescription("");
       setCategory("Road Damage");
       setImage(null);
+      setLandmark("");
+
+      await fetchComplaints();
+      await fetchNotifications();
+
+      setActiveSection(
+        "complaints"
+      );
     } catch (error) {
       console.error(
         "Complaint submission error:",
         error
       );
 
-      setMessage(
+      setSubmitError(
         error instanceof Error
           ? error.message
           : "Failed to submit complaint."
@@ -599,866 +984,1551 @@ export default function CitizenComplaint() {
     }
   };
 
+  /* =====================================================
+     MARK NOTIFICATION READ
+  ===================================================== */
+
+  const markNotificationAsRead =
+    async (
+      notificationId: number
+    ) => {
+      const token = getToken();
+
+      if (!token) return;
+
+      try {
+        const response =
+          await fetch(
+            `${API_BASE_URL}/notifications/${notificationId}/read`,
+            {
+              method: "PATCH",
+              headers: {
+                Authorization:
+                  `Bearer ${token}`,
+                Accept:
+                  "application/json",
+              },
+            }
+          );
+
+        if (response.ok) {
+          setNotifications(
+            (old) =>
+              old.map((item) =>
+                item.id ===
+                  notificationId
+                  ? {
+                    ...item,
+                    is_read: true,
+                  }
+                  : item
+              )
+          );
+        }
+      } catch (error) {
+        console.error(
+          "Mark notification error:",
+          error
+        );
+      }
+    };
+
+  /* =====================================================
+     LOGOUT
+  ===================================================== */
+
+  const logout = () => {
+    localStorage.removeItem(
+      "access_token"
+    );
+
+    localStorage.removeItem(
+      "user_role"
+    );
+
+    localStorage.removeItem(
+      "user_name"
+    );
+
+    window.location.href =
+      "/login";
+  };
+
+  /* =====================================================
+     INITIAL LOAD
+  ===================================================== */
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+
+      await Promise.all([
+        fetchCurrentUser(),
+        fetchComplaints(),
+        fetchNotifications(),
+      ]);
+
+      setLoading(false);
+    };
+
+    load();
+  }, []);
+
+  /* =====================================================
+     STATISTICS
+  ===================================================== */
+
+  const total =
+    complaints.length;
+
+  const pending =
+    complaints.filter(
+      (c) =>
+        c.status?.toLowerCase() ===
+        "pending"
+    ).length;
+
+  const verified =
+    complaints.filter(
+      (c) =>
+        c.status?.toLowerCase() ===
+        "verified"
+    ).length;
+
+  const assigned =
+    complaints.filter(
+      (c) =>
+        c.status?.toLowerCase() ===
+        "assigned"
+    ).length;
+
+  const inProgress =
+    complaints.filter(
+      (c) =>
+        c.status
+          ?.toLowerCase()
+          .replace(/-/g, "_") ===
+        "in_progress"
+    ).length;
+
+  const resolved =
+    complaints.filter(
+      (c) =>
+        c.status?.toLowerCase() ===
+        "resolved"
+    ).length;
+
+  const unreadNotifications =
+    notifications.filter(
+      (n) => !n.is_read
+    ).length;
+
+  const latestComplaints =
+    useMemo(
+      () =>
+        [...complaints]
+          .sort(
+            (a, b) =>
+              new Date(
+                b.created_at || 0
+              ).getTime() -
+              new Date(
+                a.created_at || 0
+              ).getTime()
+          )
+          ,
+      [complaints]
+    );
+
+  /* =====================================================
+     NAVIGATION
+  ===================================================== */
+
+  const changeSection = (
+    section: Section
+  ) => {
+    setActiveSection(section);
+    setMobileMenuOpen(false);
+
+    window.scrollTo({
+      top: 0,
+      behavior: "smooth",
+    });
+  };
+
+  /* =====================================================
+     LOADING
+  ===================================================== */
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="text-center">
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
+          <p className="mt-4 text-sm font-semibold text-slate-600">
+            Loading CivicPulse AI...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  /* =====================================================
+     UI
+  ===================================================== */
+
   return (
-    <main className="min-h-screen bg-slate-100 px-4 py-8">
+    <div className="min-h-screen bg-slate-50 text-slate-900">
 
-      <div className="mx-auto max-w-3xl">
+      {/* MOBILE HEADER */}
 
-        {/* HEADER */}
-        <div className="mb-5 rounded-xl bg-white p-5 shadow-sm">
+      <header className="sticky top-0 z-40 flex items-center justify-between border-b bg-white px-4 py-3 shadow-sm lg:hidden">
+        <button
+          type="button"
+          onClick={() =>
+            setMobileMenuOpen(true)
+          }
+          className="rounded-lg bg-blue-600 px-3 py-2 text-white"
+        >
+          ☰
+        </button>
 
-          <h1 className="text-2xl font-bold text-slate-900">
+        <div className="text-center">
+          <p className="font-extrabold">
+            CivicPulse AI
+          </p>
+
+          <p className="text-[10px] text-slate-500">
+            Citizen Portal
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={logout}
+          className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600"
+        >
+          Logout
+        </button>
+      </header>
+
+      {/* MOBILE MENU */}
+
+      {mobileMenuOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() =>
+              setMobileMenuOpen(false)
+            }
+          />
+
+          <aside className="relative h-full w-72 bg-white p-5 shadow-xl">
+            <div className="mb-6 flex items-center justify-between">
+              <div>
+                <h2 className="font-extrabold text-slate-900">
+                  CivicPulse AI
+                </h2>
+
+                <p className="text-xs text-slate-500">
+                  Citizen Portal
+                </p>
+              </div>
+
+              <button
+                onClick={() =>
+                  setMobileMenuOpen(false)
+                }
+                className="text-xl"
+              >
+                ✕
+              </button>
+            </div>
+
+            <nav className="space-y-2">
+              {[
+                ["dashboard", "🏠 Dashboard"],
+                ["submit", "📝 Submit Complaint"],
+                ["complaints", "📋 My Complaints"],
+                ["notifications", "🔔 Notifications"],
+                ["profile", "👤 Profile"],
+              ].map(
+                ([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() =>
+                      changeSection(
+                        key as Section
+                      )
+                    }
+                    className={`w-full rounded-xl px-4 py-3 text-left text-sm font-bold ${activeSection === key
+                      ? "bg-blue-600 text-white"
+                      : "text-slate-600 hover:bg-slate-100"
+                      }`}
+                  >
+                    {label}
+                  </button>
+                )
+              )}
+            </nav>
+          </aside>
+        </div>
+      )}
+
+      {/* DESKTOP SIDEBAR */}
+
+      <aside className="fixed inset-y-0 left-0 hidden w-64 border-r bg-white p-5 lg:block">
+        <div className="mb-8">
+          <h1 className="text-xl font-extrabold text-blue-600">
             CivicPulse AI
           </h1>
 
-          <p className="mt-1 text-slate-500">
-            Submit a Civic Complaint
+          <p className="text-xs text-slate-500">
+            Citizen Portal
           </p>
-
         </div>
 
-        {/* FORM */}
-        <form
-          onSubmit={handleSubmit}
-          className="rounded-xl bg-white p-5 shadow-sm"
-        >
-
-          {/* TITLE */}
-          <div className="mb-4">
-
-            <label className="mb-2 block text-sm font-semibold text-slate-700">
-              Complaint Title
-            </label>
-
-            <input
-              type="text"
-              value={title}
-              onChange={(e) =>
-                setTitle(e.target.value)
-              }
-              placeholder="Example: Large pothole on road"
-              className="w-full rounded-lg border border-slate-300 px-4 py-3 text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-500"
-            />
-            <button
-              type="button"
-              onClick={() => startVoiceInput("title")}
-              disabled={isListening}
-              className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isListening && voiceTarget === "title"
-                ? "🎤 Listening..."
-                : "🎤 Speak Title"}
-            </button>
-            <div className="mb-3">
-              <label className="mb-2 block text-sm font-semibold text-slate-700">
-                Voice Language
-              </label>
-
-              <select
-                value={voiceLanguage}
-                onChange={(e) => setVoiceLanguage(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-500"
-              >
-                <option value="hi-IN">Hindi (हिन्दी)</option>
-                <option value="en-IN">English</option>
-                <option value="ur-PK">Urdu (اردو)</option>
-                <option value="pa-IN">Punjabi (ਪੰਜਾਬੀ)</option>
-                <option value="bn-IN">Bengali (বাংলা)</option>
-                <option value="mr-IN">Marathi (मराठी)</option>
-                <option value="ta-IN">Tamil (தமிழ்)</option>
-                <option value="te-IN">Telugu (తెలుగు)</option>
-                <option value="gu-IN">Gujarati (ગુજરાતી)</option>
-                <option value="kn-IN">Kannada (ಕನ್ನಡ)</option>
-                <option value="ml-IN">Malayalam (മലയാളം)</option>
-              </select>
-            </div>
-
-
-          </div>
-
-          {/* DESCRIPTION */}
-          <div className="mb-4">
-
-            <label className="mb-2 block text-sm font-semibold text-slate-700">
-              Description
-            </label>
-
-            <textarea
-              value={description}
-              onChange={(e) =>
-                setDescription(e.target.value)
-              }
-              placeholder="Describe the problem..."
-              rows={4}
-              className="w-full rounded-lg border border-slate-300 px-4 py-3 text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-500"
-            />
-            <button
-              type="button"
-              onClick={() => startVoiceInput("description")}
-              disabled={isListening}
-              className="mt-2 rounded-lg bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isListening && voiceTarget === "description"
-                ? "🎤 Listening..."
-                : "🎤 Speak Description"}
-            </button>
-
-          </div>
-
-          {/* CATEGORY */}
-          <div className="mb-4">
-
-            <label className="mb-2 block text-sm font-semibold text-slate-700">
-              Category
-            </label>
-
-            <select
-              value={category}
-              onChange={(e) =>
-                setCategory(e.target.value)
-              }
-              className="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500"
-            >
-              <option value="Road Damage">
-                Road Damage
-              </option>
-
-              <option value="Street Light">
-                Street Light
-              </option>
-
-              <option value="Water Supply">
-                Water Supply
-              </option>
-
-              <option value="Garbage">
-                Garbage
-              </option>
-
-              <option value="Other">
-                Other
-              </option>
-            </select>
-
-          </div>
-
-          {/* IMAGE / CAMERA */}
-
-          <div className="mb-4">
-
-            <label className="mb-2 block text-sm font-semibold text-slate-700">
-              Complaint Image
-            </label>
-
-            <div className="flex flex-wrap gap-3">
-
-              {/* Take Photo */}
+        <nav className="space-y-2">
+          {[
+            ["dashboard", "🏠 Dashboard"],
+            ["submit", "📝 Submit Complaint"],
+            ["complaints", "📋 My Complaints"],
+            ["notifications", "🔔 Notifications"],
+            ["profile", "👤 Profile"],
+          ].map(
+            ([key, label]) => (
               <button
+                key={key}
                 type="button"
-                onClick={() => cameraInputRef.current?.click()}
-                className="rounded-lg bg-blue-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-blue-700"
+                onClick={() =>
+                  changeSection(
+                    key as Section
+                  )
+                }
+                className={`w-full rounded-xl px-4 py-3 text-left text-sm font-bold ${activeSection === key
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-slate-600 hover:bg-slate-100"
+                  }`}
               >
-                📷 Take Photo
+                {label}
+
+                {key ===
+                  "notifications" &&
+                  unreadNotifications >
+                  0 && (
+                    <span className="float-right rounded-full bg-red-500 px-2 py-0.5 text-[10px] text-white">
+                      {unreadNotifications}
+                    </span>
+                  )}
               </button>
-
-              {/* Upload Image */}
-              <label className="cursor-pointer rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50">
-                📁 Upload Image
-
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) =>
-                    setImage(e.target.files?.[0] || null)
-                  }
-                  className="hidden"
-                />
-              </label>
-
-            </div>
-
-            {/* Camera input */}
-            <input
-              ref={cameraInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) =>
-                setImage(e.target.files?.[0] || null)
-              }
-              className="hidden"
-            />
-
-            {/* Selected image */}
-            {image && (
-              <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-
-                <p className="text-xs font-semibold text-slate-500">
-                  Selected Image
-                </p>
-
-                <p className="mt-1 break-all text-sm font-medium text-slate-700">
-                  {image.name}
-                </p>
-
-              </div>
-            )}
-
-          </div>
-
-          {/* LOCATION */}
-          <div className="mb-4 rounded-lg bg-slate-50 p-4">
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-
-              <div>
-
-                <p className="text-sm font-semibold text-slate-700">
-                  📍 Complaint Location
-                </p>
-
-                <p className="mt-1 text-xs text-slate-500">
-                  Your location will be detected automatically.
-                </p>
-
-              </div>
-
-              <button
-                type="button"
-                onClick={getCurrentLocation}
-                disabled={locationLoading}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-              >
-                {locationLoading
-                  ? "Detecting..."
-                  : "📍 Detect My Location"}
-              </button>
-              {process.env.NODE_ENV === "development" && (
-                <button
-                  type="button"
-                  onClick={setBiharTestLocation}
-                  disabled={locationLoading}
-                  className="rounded-lg border border-orange-300 bg-orange-50 px-4 py-2 text-sm font-medium text-orange-700 hover:bg-orange-100 disabled:opacity-50"
-                >
-                  🧪 Test Bihar Location
-                </button>
-              )}
-
-            </div>
-
-            {/* LOCATION ERROR */}
-            {locationError && (
-              <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-600">
-                {locationError}
-              </p>
-            )}
-
-            {/* LOCATION DETAILS */}
-            {latitude !== null &&
-              longitude !== null && (
-
-                <div className="mt-4 space-y-3">
-
-                  {/* ROAD */}
-                  <div>
-                    <p className="text-xs text-slate-500">
-                      Road
-                    </p>
-
-                    <p className="font-semibold text-slate-800">
-                      {road || "Detecting road..."}
-                    </p>
-                  </div>
-
-                  {/* CITY */}
-                  <div>
-                    <p className="text-xs text-slate-500">
-                      City
-                    </p>
-
-                    <p className="font-semibold text-slate-800">
-                      {city || "Detecting city..."}
-                    </p>
-                  </div>
-
-                  {/* STATE */}
-                  <div>
-                    <p className="text-xs text-slate-500">
-                      State
-                    </p>
-
-                    <p className="font-semibold text-slate-800">
-                      {state || "Detecting state..."}
-                    </p>
-                  </div>
-
-                  {/* COORDINATES */}
-                  <div>
-                    <p className="text-xs text-slate-500">
-                      Coordinates
-                    </p>
-
-                    <p className="text-sm text-slate-700">
-                      Latitude:{" "}
-                      {latitude.toFixed(6)}
-                      {" • "}
-                      Longitude:{" "}
-                      {longitude.toFixed(6)}
-                    </p>
-                  </div>
-
-                  {/* FULL ADDRESS */}
-                  <div>
-                    <p className="text-xs text-slate-500">
-                      Full Address
-                    </p>
-
-                    <p className="text-sm leading-6 text-slate-700">
-                      {address}
-                    </p>
-                  </div>
-
-                  {/* MAP LINK */}
-                  <a
-                    href={`https://www.google.com/maps?q=${latitude},${longitude}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-block rounded-lg border border-blue-300 bg-white px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-                  >
-                    🗺️ View Location on Map
-                  </a>
-
-                </div>
-              )}
-
-          </div>
-
-          {/* MESSAGE */}
-          {message && (
-            <div className="mb-4 rounded-lg border border-green-200 bg-green-50 p-4">
-              <p className="text-sm font-semibold text-green-800">
-                {message}
-              </p>
-
-              {submittedComplaintId !== null && (
-                <button
-                  type="button"
-                  onClick={() => router.push("/citizen")}
-                  className="mt-3 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700"
-                >
-                  View My Complaints
-                </button>
-              )}
-            </div>
+            )
           )}
-          {/* SUBMIT */}
+        </nav>
+
+        <div className="absolute bottom-5 left-5 right-5">
           <button
-            type="submit"
-            disabled={submitting}
-            className="w-full rounded-lg bg-blue-600 px-5 py-3 font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            onClick={logout}
+            className="w-full rounded-xl bg-red-50 px-4 py-3 text-sm font-bold text-red-600"
           >
-            {submitting
-              ? "Submitting Complaint..."
-              : "Submit Complaint"}
+            Logout
           </button>
-
-        </form>
-
-      </div>
-
-
-      {/* MY COMPLAINTS */}
-
-      <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
-        <div className="mb-5 flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-bold text-slate-800">
-              My Complaints
-            </h2>
-
-            <p className="mt-1 text-sm text-slate-500">
-              Track the status of your submitted complaints.
-            </p>
-          </div>
-
-          <span className="rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
-            {myComplaints.length}
-          </span>
         </div>
+      </aside>
 
-        {loadingComplaints ? (
-          <p className="text-sm text-slate-500">
-            Loading your complaints...
-          </p>
-        ) : myComplaints.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center">
-            <p className="text-sm text-slate-500">
-              You have not submitted any complaints yet.
-            </p>
+      {/* MAIN */}
+
+      <main className="min-h-screen lg:pl-64">
+        <div className="p-4 sm:p-6 lg:p-8">
+
+          {/* HEADER */}
+
+          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-2xl font-extrabold sm:text-3xl">
+                Citizen Dashboard
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Manage your civic complaints
+                and track government action.
+              </p>
+            </div>
+
+            <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
+              <p className="text-[10px] text-slate-400">
+                Logged in as
+              </p>
+
+              <p className="text-sm font-bold text-slate-800">
+                {user?.name ||
+                  "Citizen"}
+              </p>
+            </div>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {myComplaints.map((complaint) => (
-              <div
-                key={complaint.id}
-                className="rounded-xl border border-slate-200 p-4 transition hover:shadow-sm"
-              >
-                {/* COMPLAINT HEADER */}
 
-                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
+          {/* =================================================
+              DASHBOARD
+          ================================================= */}
 
-                  {/* Top row */}
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          {activeSection ===
+            "dashboard" && (
+              <div className="space-y-5">
 
-                    <div className="min-w-0">
+                <div className="rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 p-6 text-white shadow-lg">
+                  <p className="text-sm text-blue-100">
+                    Welcome back 👋
+                  </p>
 
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <h3 className="mt-1 text-2xl font-extrabold">
+                    {user?.name ||
+                      "Citizen"}
+                  </h3>
 
-                        <span className="rounded-md bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-500">
-                          Complaint #{complaint.id}
-                        </span>
+                  <p className="mt-2 max-w-2xl text-sm text-blue-100">
+                    Report civic problems,
+                    track your complaints,
+                    and stay updated with
+                    every action.
+                  </p>
 
-                        <span
-                          className={`rounded-full px-2.5 py-1 text-xs font-bold capitalize ${complaint.status === "resolved"
-                            ? "bg-green-100 text-green-700"
-                            : complaint.status === "pending"
-                              ? "bg-yellow-100 text-yellow-700"
-                              : complaint.status === "verified"
-                                ? "bg-blue-100 text-blue-700"
-                                : complaint.status === "assigned"
-                                  ? "bg-purple-100 text-purple-700"
-                                  : complaint.status === "in_progress"
-                                    ? "bg-orange-100 text-orange-700"
-                                    : "bg-red-100 text-red-700"
-                            }`}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      changeSection(
+                        "submit"
+                      )
+                    }
+                    className="mt-5 rounded-xl bg-white px-5 py-3 text-sm font-extrabold text-blue-600"
+                  >
+                    + Submit Complaint
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+
+                  {[
+                    [
+                      "Total",
+                      total,
+                      "📋",
+                      "text-slate-900",
+                    ],
+                    [
+                      "Pending",
+                      pending,
+                      "⏳",
+                      "text-yellow-600",
+                    ],
+                    [
+                      "Verified",
+                      verified,
+                      "🔎",
+                      "text-blue-600",
+                    ],
+                    [
+                      "Assigned",
+                      assigned,
+                      "👨‍💼",
+                      "text-purple-600",
+                    ],
+                    [
+                      "In Progress",
+                      inProgress,
+                      "🔧",
+                      "text-orange-600",
+                    ],
+                    [
+                      "Resolved",
+                      resolved,
+                      "✅",
+                      "text-green-600",
+                    ],
+                  ].map(
+                    (item) => (
+                      <div
+                        key={item[0]}
+                        className="rounded-xl border bg-white p-4 shadow-sm"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xl">
+                            {item[2]}
+                          </span>
+
+                          <span className="text-xs text-slate-400">
+                            {item[0]}
+                          </span>
+                        </div>
+
+                        <p
+                          className={`mt-3 text-2xl font-extrabold ${item[3]}`}
                         >
-                          {complaint.status.replace("_", " ")}
-                        </span>
+                          {item[1]}
+                        </p>
 
+                        <p className="text-xs text-slate-500">
+                          {item[0]} complaints
+                        </p>
                       </div>
+                    )
+                  )}
+                </div>
 
-                      <h3 className="text-lg font-bold text-slate-800">
-                        {complaint.title}
+                <div className="grid gap-5 lg:grid-cols-2">
+
+                  <div className="rounded-2xl border bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-extrabold">
+                        Recent Complaints
                       </h3>
 
-                      <p className="mt-1 text-sm font-medium text-slate-500">
-                        {complaint.category}
-                      </p>
-
+                      <button
+                        type="button"
+                        onClick={() =>
+                          changeSection(
+                            "complaints"
+                          )
+                        }
+                        className="text-xs font-bold text-blue-600"
+                      >
+                        View All
+                      </button>
                     </div>
 
-                    {/* Priority */}
-                    <span
-                      className={`w-fit rounded-full px-3 py-1.5 text-xs font-bold capitalize ${complaint.priority === "critical"
-                        ? "bg-red-100 text-red-700"
-                        : complaint.priority === "high"
-                          ? "bg-orange-100 text-orange-700"
-                          : "bg-slate-100 text-slate-600"
-                        }`}
-                    >
-                      {complaint.priority} priority
-                    </span>
-
-                  </div>
-
-                  {/* Description */}
-                  <div className="mt-4 rounded-lg bg-slate-50 p-3">
-                    <p className="text-sm leading-6 text-slate-600">
-                      {complaint.description}
-                    </p>
-                  </div>
-
-                  {/* Location */}
-                  {complaint.address && (
-                    <div className="mt-4 flex items-start gap-2">
-
-                      <span className="mt-0.5 text-base">
-                        📍
-                      </span>
-
-                      <p className="text-sm leading-5 text-slate-600">
-                        {complaint.address}
-                      </p>
-
-                    </div>
-                  )}
-
-                  {/* Quick information */}
-                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-
-                    <div className="rounded-lg border border-slate-200 bg-white p-3">
-                      <p className="text-xs font-medium text-slate-400">
-                        AI Detection
-                      </p>
-
-                      <p className="mt-1 text-sm font-bold text-slate-700">
-                        {complaint.pothole_count ?? 0} pothole
-                        {(complaint.pothole_count ?? 0) !== 1 ? "s" : ""} detected
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-slate-200 bg-white p-3">
-                      <p className="text-xs font-medium text-slate-400">
-                        Department
-                      </p>
-
-                      <p className="mt-1 text-sm font-bold text-slate-700">
-                        {complaint.department || "Not assigned"}
-                      </p>
-                    </div>
-
-                  </div>
-
-                </div>
-                {/* COMPLAINT TIMELINE */}
-
-                <div className="mt-5 border-t border-slate-200 pt-5">
-
-                  <div className="mb-4 flex items-center justify-between">
-                    <div>
-                      <h4 className="text-sm font-bold text-slate-700">
-                        Complaint Progress
-                      </h4>
-
-                      <p className="mt-1 text-xs text-slate-400">
-                        Track your complaint journey
-                      </p>
-                    </div>
-
-                    <span className="text-xs font-semibold text-slate-400">
-                      {getComplaintTimeline(complaint).filter(
-                        (step) => step.completed
-                      ).length}
-                      /
-                      {getComplaintTimeline(complaint).length}
-                    </span>
-                  </div>
-
-                  <div className="overflow-x-auto pb-2">
-
-                    <div className="flex min-w-[650px] items-start">
-
-                      {getComplaintTimeline(complaint).map((step, index) => (
-                        <div
-                          key={step.label}
-                          className="relative flex flex-1 flex-col items-center"
-                        >
-
-                          {/* Connector */}
-                          {index <
-                            getComplaintTimeline(complaint).length - 1 && (
-                              <div
-                                className={`absolute left-1/2 top-4 h-0.5 w-full ${step.completed &&
-                                  getComplaintTimeline(complaint)[index + 1]
-                                    .completed
-                                  ? "bg-green-400"
-                                  : "bg-slate-200"
-                                  }`}
-                              />
-                            )}
-
-                          {/* Step circle */}
-                          <div
-                            className={`relative z-10 flex h-8 w-8 items-center justify-center rounded-full border-2 text-xs font-bold ${step.completed
-                              ? "border-green-500 bg-green-500 text-white"
-                              : "border-slate-200 bg-white text-slate-400"
-                              }`}
-                          >
-                            {step.completed ? "✓" : index + 1}
-                          </div>
-
-                          {/* Label */}
-                          <p
-                            className={`mt-2 text-center text-[11px] font-semibold ${step.completed
-                              ? "text-slate-700"
-                              : "text-slate-400"
-                              }`}
-                          >
-                            {step.label}
-                          </p>
-
-                          {/* Date */}
-                          {step.date && (
-                            <p className="mt-1 text-center text-[10px] text-slate-400">
-                              {new Date(step.date).toLocaleDateString("en-IN")}
-                            </p>
-                          )}
-
-                        </div>
-                      ))}
-
-                    </div>
-
-                  </div>
-
-                </div>
-                {/* GOVERNMENT ACTION DETAILS */}
-
-                {(complaint.department ||
-                  complaint.assigned_to ||
-                  complaint.action_taken) && (
-                    <div className="mt-5 border-t border-slate-200 pt-5">
-
-                      <div className="mb-4 flex items-center justify-between">
-                        <div>
-                          <h4 className="text-sm font-bold text-slate-700">
-                            Government Action
-                          </h4>
-
-                          <p className="mt-1 text-xs text-slate-400">
-                            Current handling details
-                          </p>
-                        </div>
-
-                        {complaint.status === "resolved" && (
-                          <span className="rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">
-                            ✓ Completed
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-
-                        {/* Department */}
-                        {complaint.department && (
-                          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                            <p className="text-xs font-medium text-slate-400">
-                              Department
-                            </p>
-
-                            <p className="mt-1 text-sm font-semibold text-slate-700">
-                              {complaint.department}
-                            </p>
-                          </div>
-                        )}
-
-                        {/* Officer */}
-                        {complaint.assigned_to && (
-                          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                            <p className="text-xs font-medium text-slate-400">
-                              Assigned Officer
-                            </p>
-
-                            <p className="mt-1 text-sm font-semibold text-slate-700">
-                              Officer #{complaint.assigned_to}
-                            </p>
-                          </div>
-                        )}
-
-                      </div>
-
-                      {/* Action Taken */}
-                      {complaint.action_taken && (
-                        <div className="mt-3 rounded-lg border border-green-100 bg-green-50 p-4">
-
-                          <div className="flex items-start gap-3">
-
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-green-100 text-sm text-green-600">
-                              ✓
-                            </div>
-
-                            <div className="min-w-0">
-                              <p className="text-xs font-semibold text-green-700">
-                                Action Taken
-                              </p>
-
-                              <p className="mt-1 text-sm leading-5 text-slate-700">
-                                {complaint.action_taken}
-                              </p>
-
-                              {complaint.action_taken_at && (
-                                <p className="mt-2 text-xs text-slate-400">
-                                  {new Date(
-                                    complaint.action_taken_at
-                                  ).toLocaleString("en-IN")}
-                                </p>
-                              )}
-                            </div>
-
-                          </div>
-
-                        </div>
-                      )}
-
-                    </div>
-                  )}
-                {/* CITIZEN FEEDBACK */}
-
-                {complaint.status === "resolved" && (
-                  <div className="mt-5 border-t border-slate-200 pt-5">
-
-                    {submittedFeedback[complaint.id] ? (
-
-                      /* AFTER SUBMISSION */
-                      <div className="flex items-center gap-3 rounded-xl border border-green-200 bg-green-50 p-4">
-
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-green-100 text-lg text-green-600">
-                          ✓
-                        </div>
-
-                        <div>
-                          <h4 className="text-sm font-bold text-green-800">
-                            Feedback Submitted
-                          </h4>
-
-                          <p className="mt-1 text-xs text-green-700">
-                            Thank you for helping improve civic services.
-                          </p>
-                        </div>
-
-                      </div>
-
-                    ) : (
-
-                      /* BEFORE SUBMISSION */
-                      <div>
-
-                        <div className="mb-4">
-                          <h4 className="text-sm font-bold text-slate-700">
-                            Rate this resolution
-                          </h4>
-
-                          <p className="mt-1 text-xs text-slate-500">
-                            How was your experience?
-                          </p>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-4">
-
-                          <div className="flex gap-1">
-
-                            {[1, 2, 3, 4, 5].map((rating) => (
-                              <button
-                                key={rating}
-                                type="button"
-                                aria-label={`Rate ${rating} out of 5`}
-                                onClick={() =>
-                                  setFeedbackRating((prev) => ({
-                                    ...prev,
-                                    [complaint.id]: rating,
-                                  }))
-                                }
-                                className={`text-2xl transition-all duration-200 ${feedbackRating[complaint.id] >= rating
-                                  ? "scale-110 text-amber-400"
-                                  : "text-slate-300 hover:scale-110 hover:text-amber-300"
-                                  }`}
-                              >
-                                ★
-                              </button>
-                            ))}
-
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => submitFeedback(complaint.id)}
-                            disabled={!feedbackRating[complaint.id]}
-                            className="rounded-lg bg-green-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            Submit Feedback
-                          </button>
-
-                        </div>
-
-                        {feedbackRating[complaint.id] && (
-                          <p className="mt-2 text-xs text-slate-500">
-                            Selected rating:{" "}
-                            <span className="font-semibold text-amber-500">
-                              {feedbackRating[complaint.id]} / 5
-                            </span>
-                          </p>
-                        )}
-
-                        {feedbackMessage[complaint.id] && (
-                          <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-600">
-                            {feedbackMessage[complaint.id]}
-                          </p>
-                        )}
-
-                      </div>
-
-                    )}
-
-                  </div>
-                )}
-                {/* ADMIN VIEW - CITIZEN FEEDBACK */}
-                {complaint.feedback && complaint.feedback.length > 0 && (
-                  <div className="mt-5 border-t border-slate-200 pt-5">
-                    <div className="mb-4">
-                      <h4 className="text-sm font-bold text-slate-700">
-                        Citizen Feedback
-                      </h4>
-                      <p className="mt-1 text-xs text-slate-400">
-                        Feedback submitted by the citizen
-                      </p>
-                    </div>
-
-                    <div className="space-y-3">
-                      {(complaint.feedback || []).map((feedback: any) => (
-                        <div
-                          key={feedback.id}
-                          className="rounded-lg border border-slate-200 bg-slate-50 p-4"
-                        >
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <p className="text-xs font-medium text-slate-400">
-                                Rating
-                              </p>
-
-                              <div className="mt-1 flex items-center gap-2">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-lg tracking-wide">
-                                    <span className="text-amber-400">
-                                      {"★".repeat(feedback.rating)}
-                                    </span>
-                                    <span className="text-slate-300">
-                                      {"★".repeat(5 - feedback.rating)}
-                                    </span>
-                                  </span>
-
-                                  <span className="text-xs font-semibold text-slate-600">
-                                    {feedback.rating}/5
-                                  </span>
+                    <div className="mt-4 space-y-3">
+                      {latestComplaints.length ===
+                        0 ? (
+                        <p className="py-8 text-center text-sm text-slate-400">
+                          No complaints yet.
+                        </p>
+                      ) : (
+                        latestComplaints.map(
+                          (complaint) => (
+                            <div
+                              key={
+                                complaint.id
+                              }
+                              className="rounded-xl border p-4"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="font-bold">
+                                    {
+                                      complaint.title
+                                    }
+                                  </p>
+
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    Complaint #
+                                    {
+                                      complaint.id
+                                    }
+                                  </p>
                                 </div>
 
-                                <span className="text-xs font-semibold text-slate-600">
-                                  {feedback.rating}/5
+                                <span
+                                  className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${statusClass(
+                                    complaint.status
+                                  )}`}
+                                >
+                                  {formatStatus(
+                                    complaint.status
+                                  )}
                                 </span>
                               </div>
                             </div>
+                          )
+                        )
+                      )}
+                    </div>
+                  </div>
 
-                            {feedback.created_at && (
-                              <span className="text-xs text-slate-400">
-                                {new Date(feedback.created_at).toLocaleString("en-IN")}
-                              </span>
-                            )}
-                          </div>
+                  <div className="rounded-2xl border bg-white p-5 shadow-sm">
+                    <h3 className="font-extrabold">
+                      Quick Actions
+                    </h3>
 
-                          {feedback.comment && (
-                            <div className="mt-3 rounded-md bg-white p-3">
-                              <p className="text-xs font-semibold text-slate-400">
-                                Citizen Comment
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          changeSection(
+                            "submit"
+                          )
+                        }
+                        className="rounded-xl bg-blue-600 p-4 text-left text-white"
+                      >
+                        <p className="text-lg">
+                          📝
+                        </p>
+
+                        <p className="mt-2 font-bold">
+                          Report Problem
+                        </p>
+
+                        <p className="mt-1 text-xs text-blue-100">
+                          Submit a new civic
+                          complaint.
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          changeSection(
+                            "notifications"
+                          )
+                        }
+                        className="rounded-xl bg-slate-100 p-4 text-left"
+                      >
+                        <p className="text-lg">
+                          🔔
+                        </p>
+
+                        <p className="mt-2 font-bold">
+                          Notifications
+                        </p>
+
+                        <p className="mt-1 text-xs text-slate-500">
+                          {unreadNotifications}{" "}
+                          unread updates.
+                        </p>
+                      </button>
+
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+          {/* =================================================
+              SUBMIT
+          ================================================= */}
+
+          {activeSection ===
+            "submit" && (
+              <div className="mx-auto max-w-3xl">
+
+                <div className="mb-5">
+                  <h3 className="text-2xl font-extrabold">
+                    Submit Complaint
+                  </h3>
+
+                  <p className="mt-1 text-sm text-slate-500">
+                    Tell us about the civic
+                    problem. You can type or
+                    speak the title and
+                    description.
+                  </p>
+                </div>
+
+                {submitMessage && (
+                  <div className="mb-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm font-semibold text-green-700">
+                    ✅ {submitMessage}
+                  </div>
+                )}
+
+                {submitError && (
+                  <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
+                    ⚠️ {submitError}
+                  </div>
+                )}
+
+                <form
+                  onSubmit={
+                    handleComplaintSubmit
+                  }
+                  className="space-y-5 rounded-2xl border bg-white p-5 shadow-sm sm:p-6"
+                >
+
+                  {/* TITLE */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Complaint Title *
+                    </label>
+
+                    <div className="flex gap-2">
+                      <input
+                        value={title}
+                        onChange={(e) =>
+                          setTitle(
+                            e.target.value
+                          )
+                        }
+                        placeholder="Example: Large pothole on main road"
+                        className="flex-1 rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          startVoiceInput(
+                            "title"
+                          )
+                        }
+                        className={`rounded-xl px-4 text-lg ${listeningField ===
+                          "title"
+                          ? "bg-red-500 text-white"
+                          : "bg-blue-50 text-blue-600"
+                          }`}
+                      >
+                        {listeningField ===
+                          "title"
+                          ? "⏹"
+                          : "🎤"}
+                      </button>
+                    </div>
+
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Type it or click 🎤 and
+                      speak.
+                    </p>
+                  </div>
+
+                  {/* DESCRIPTION */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Description *
+                    </label>
+
+                    <div className="flex gap-2">
+                      <textarea
+                        value={description}
+                        onChange={(e) =>
+                          setDescription(
+                            e.target.value
+                          )
+                        }
+                        rows={5}
+                        placeholder="Describe the problem..."
+                        className="flex-1 resize-none rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          startVoiceInput(
+                            "description"
+                          )
+                        }
+                        className={`h-12 rounded-xl px-4 text-lg ${listeningField ===
+                          "description"
+                          ? "bg-red-500 text-white"
+                          : "bg-blue-50 text-blue-600"
+                          }`}
+                      >
+                        {listeningField ===
+                          "description"
+                          ? "⏹"
+                          : "🎤"}
+                      </button>
+                    </div>
+
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Type or use voice input.
+                    </p>
+                  </div>
+
+                  {/* CATEGORY */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Category
+                    </label>
+
+                    <select
+                      value={category}
+                      onChange={(e) =>
+                        setCategory(
+                          e.target.value
+                        )
+                      }
+                      className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option>
+                        Road Damage
+                      </option>
+
+                      <option>
+                        Garbage
+                      </option>
+
+                      <option>
+                        Street Light
+                      </option>
+
+                      <option>
+                        Water Supply
+                      </option>
+
+                      <option>
+                        Drainage
+                      </option>
+
+                      <option>
+                        Traffic
+                      </option>
+
+                      <option>
+                        Other
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* IMAGE */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Problem Image
+                    </label>
+
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) =>
+                        setImage(
+                          e.target.files?.[0] ||
+                          null
+                        )
+                      }
+                      className="w-full rounded-xl border border-slate-300 p-3 text-sm"
+                    />
+
+                    {image && (
+                      <p className="mt-2 text-xs text-green-600">
+                        Selected:{" "}
+                        {image.name}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* LANDMARK */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Landmark
+                    </label>
+
+                    <input
+                      value={landmark}
+                      onChange={(e) =>
+                        setLandmark(
+                          e.target.value
+                        )
+                      }
+                      placeholder="Example: Near college gate"
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  {/* LOCATION */}
+
+                  <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h4 className="font-extrabold text-blue-900">
+                          📍 Complaint Location
+                        </h4>
+
+                        <p className="mt-1 text-xs text-blue-700">
+                          Your location is
+                          detected automatically
+                          when this page opens.
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={
+                          detectLocation
+                        }
+                        disabled={
+                          locationLoading
+                        }
+                        className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+                      >
+                        {locationLoading
+                          ? "Detecting..."
+                          : "📍 Detect My Location"}
+                      </button>
+                    </div>
+
+                    {locationError && (
+                      <div className="mt-3 rounded-xl bg-red-50 p-3 text-xs font-semibold text-red-600">
+                        {locationError}
+                      </div>
+                    )}
+
+                    {/* INTERACTIVE MAP PICKER */}
+                    <LocationPicker
+                      latitude={latitude}
+                      longitude={longitude}
+                      onSelect={handleMapLocationSelect}
+                    />
+
+
+                    {latitude !== null &&
+                      longitude !==
+                      null && (
+                        <div className="mt-4 space-y-3">
+
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                Latitude
                               </p>
 
-                              <p className="mt-1 text-sm text-slate-700">
-                                {feedback.comment}
+                              <p className="text-sm font-bold">
+                                {latitude}
                               </p>
                             </div>
-                          )}
+
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                Longitude
+                              </p>
+
+                              <p className="text-sm font-bold">
+                                {longitude}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl bg-white p-3">
+                            <p className="text-[10px] text-slate-400">
+                              Address
+                            </p>
+
+                            <p className="mt-1 text-sm font-semibold">
+                              {address ||
+                                "Address not available"}
+                            </p>
+                          </div>
+
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                Road
+                              </p>
+
+                              <p className="text-xs font-bold">
+                                {road ||
+                                  "Not available"}
+                              </p>
+                            </div>
+
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                City
+                              </p>
+
+                              <p className="text-xs font-bold">
+                                {city ||
+                                  "Not available"}
+                              </p>
+                            </div>
+
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                State
+                              </p>
+
+                              <p className="text-xs font-bold">
+                                {state ||
+                                  "Not available"}
+                              </p>
+                            </div>
+                          </div>
+
+                          {roadDistance !==
+                            null && (
+                              <p className="text-xs text-blue-700">
+                                Road distance:
+                                {" "}
+                                {roadDistance}
+                                {" "}
+                                meters
+                              </p>
+                            )}
+
+                          <a
+                            href={`https://www.google.com/maps?q=${latitude},${longitude}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-block text-xs font-bold text-blue-600 underline"
+                          >
+                            Open location in
+                            Google Maps →
+                          </a>
                         </div>
-                      ))}
-                    </div>
+                      )}
+                  </div>
+
+                  {/* SUBMIT */}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="w-full rounded-xl bg-blue-600 px-5 py-4 text-sm font-extrabold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {submitting
+                      ? "Submitting Complaint..."
+                      : "🚀 Submit Complaint"}
+                  </button>
+
+                </form>
+              </div>
+            )}
+
+          {/* =================================================
+              COMPLAINTS
+          ================================================= */}
+
+          {activeSection ===
+            "complaints" && (
+              <div>
+
+                <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-2xl font-extrabold">
+                      My Complaints
+                    </h3>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Track all your submitted
+                      complaints.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setLoading(true);
+                      await fetchComplaints();
+                      setLoading(false);
+                    }}
+                    className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+
+                {complaints.length ===
+                  0 ? (
+                  <div className="rounded-2xl border bg-white p-10 text-center shadow-sm">
+                    <p className="text-4xl">
+                      📋
+                    </p>
+
+                    <h4 className="mt-3 font-extrabold">
+                      No complaints yet
+                    </h4>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Submit your first civic
+                      complaint.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        changeSection(
+                          "submit"
+                        )
+                      }
+                      className="mt-5 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white"
+                    >
+                      Submit Complaint
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {complaints.map(
+                      (complaint) => {
+                        const imageUrl =
+                          getImageUrl(
+                            complaint.image_url
+                          );
+
+                        const expanded =
+                          expandedId ===
+                          complaint.id;
+
+                        return (
+                          <div
+                            key={
+                              complaint.id
+                            }
+                            className="overflow-hidden rounded-2xl border bg-white shadow-sm"
+                          >
+
+                            <div className="p-5">
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+
+                                <div>
+                                  <p className="text-xs font-bold text-slate-400">
+                                    Complaint #
+                                    {
+                                      complaint.id
+                                    }
+                                  </p>
+
+                                  <h4 className="mt-1 text-lg font-extrabold">
+                                    {
+                                      complaint.title
+                                    }
+                                  </h4>
+
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    {formatDate(
+                                      complaint.created_at
+                                    )}
+                                  </p>
+                                </div>
+
+                                <span
+                                  className={`w-fit rounded-full px-3 py-1.5 text-xs font-bold ${statusClass(
+                                    complaint.status
+                                  )}`}
+                                >
+                                  {formatStatus(
+                                    complaint.status
+                                  )}
+                                </span>
+                              </div>
+
+                              <p className="mt-4 text-sm leading-6 text-slate-600">
+                                {
+                                  complaint.description
+                                }
+                              </p>
+
+                              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+
+                                <div className="rounded-xl bg-slate-50 p-3">
+                                  <p className="text-[10px] text-slate-400">
+                                    Category
+                                  </p>
+
+                                  <p className="mt-1 text-xs font-bold">
+                                    {
+                                      complaint.category ||
+                                      "Not assigned"
+                                    }
+                                  </p>
+                                </div>
+
+                                <div className="rounded-xl bg-slate-50 p-3">
+                                  <p className="text-[10px] text-slate-400">
+                                    Priority
+                                  </p>
+
+                                  <p className="mt-1 text-xs font-bold">
+                                    {
+                                      complaint.priority ||
+                                      "Not assigned"
+                                    }
+                                  </p>
+                                </div>
+
+                                <div className="rounded-xl bg-slate-50 p-3">
+                                  <p className="text-[10px] text-slate-400">
+                                    Department
+                                  </p>
+
+                                  <p className="mt-1 text-xs font-bold">
+                                    {
+                                      complaint.department ||
+                                      "Not assigned"
+                                    }
+                                  </p>
+                                </div>
+
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedId(
+                                    expanded
+                                      ? null
+                                      : complaint.id
+                                  )
+                                }
+                                className="mt-4 text-xs font-bold text-blue-600"
+                              >
+                                {expanded
+                                  ? "Hide Details ↑"
+                                  : "View Details ↓"}
+                              </button>
+                            </div>
+
+                            {expanded && (
+                              <div className="border-t bg-slate-50 p-5">
+
+                                {imageUrl && (
+                                  <div className="mb-5">
+                                    <p className="mb-2 text-xs font-bold text-slate-500">
+                                      Complaint Image
+                                    </p>
+
+                                    <img
+                                      src={
+                                        imageUrl
+                                      }
+                                      alt="Complaint"
+                                      className="max-h-80 w-full rounded-xl object-cover sm:w-96"
+                                      onError={(
+                                        e
+                                      ) => {
+                                        e.currentTarget.style.display =
+                                          "none";
+                                      }}
+                                    />
+                                  </div>
+                                )}
+
+                                <div className="grid gap-3 sm:grid-cols-2">
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      Location
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-semibold">
+                                      {complaint.address ||
+                                        [
+                                          complaint.road,
+                                          complaint.city,
+                                          complaint.state,
+                                        ]
+                                          .filter(
+                                            Boolean
+                                          )
+                                          .join(
+                                            ", "
+                                          ) ||
+                                        "Location not available"}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      Coordinates
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-semibold">
+                                      {complaint.latitude !==
+                                        null &&
+                                        complaint.latitude !==
+                                        undefined
+                                        ? `${complaint.latitude}, ${complaint.longitude}`
+                                        : "Not available"}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      AI Potholes
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-bold">
+                                      {
+                                        complaint.pothole_count ??
+                                        0
+                                      }
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      AI Confidence
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-bold">
+                                      {complaint.ai_confidence !==
+                                        null &&
+                                        complaint.ai_confidence !==
+                                        undefined
+                                        ? `${(
+                                          complaint.ai_confidence *
+                                          100
+                                        ).toFixed(
+                                          1
+                                        )}%`
+                                        : "Not available"}
+                                    </p>
+                                  </div>
+
+                                </div>
+
+                                {complaint.latitude !==
+                                  null &&
+                                  complaint.latitude !==
+                                  undefined &&
+                                  complaint.longitude !==
+                                  null &&
+                                  complaint.longitude !==
+                                  undefined && (
+                                    <a
+                                      href={`https://www.google.com/maps?q=${complaint.latitude},${complaint.longitude}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="mt-4 inline-block text-xs font-bold text-blue-600 underline"
+                                    >
+                                      📍 Open Complaint
+                                      Location
+                                    </a>
+                                  )}
+
+                                {complaint.action_taken && (
+                                  <div className="mt-4 rounded-xl bg-green-50 p-4">
+                                    <p className="text-xs font-bold text-green-700">
+                                      Action Taken
+                                    </p>
+
+                                    <p className="mt-1 text-sm text-green-800">
+                                      {
+                                        complaint.action_taken
+                                      }
+                                    </p>
+                                  </div>
+                                )}
+
+                                {complaint.rejection_reason && (
+                                  <div className="mt-4 rounded-xl bg-red-50 p-4">
+                                    <p className="text-xs font-bold text-red-700">Rejection Reason</p>
+                                    <p className="mt-1 text-sm text-red-800">{complaint.rejection_reason}</p>
+                                  </div>
+                                )}
+
+                                {/* GOVERNMENT WORKFLOW / CITIZEN TRACKING */}
+                                <section className="mt-5 rounded-2xl border border-blue-100 bg-white p-4 sm:p-5">
+                                  <div className="flex items-start gap-3">
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-xl">🧭</span>
+                                    <div>
+                                      <h4 className="text-sm font-extrabold text-slate-800">Government Workflow</h4>
+                                      <p className="mt-1 text-xs text-slate-500">Track the official progress of your complaint.</p>
+                                    </div>
+                                  </div>
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                    {[
+                                      ["Submitted", complaint.created_at, true],
+                                      ["Verified", complaint.verified_at, ["verified", "assigned", "in_progress", "action_taken", "resolved"].includes((complaint.status || "").toLowerCase())],
+                                      ["Department assigned", complaint.department_assigned_at, !!complaint.department],
+                                      ["Officer assigned", complaint.officer_assigned_at, !!complaint.assigned_to],
+                                      ["Work in progress", complaint.in_progress_at, (complaint.status || "").toLowerCase() === "in_progress" || !!complaint.in_progress_at],
+                                      ["Action taken", complaint.action_taken_at, (complaint.status || "").toLowerCase() === "action_taken" || !!complaint.action_taken_at],
+                                      ["Resolved", complaint.resolved_at, (complaint.status || "").toLowerCase() === "resolved" || !!complaint.resolved_at],
+                                    ].map(([label, date, done]) => (
+                                      <div key={String(label)} className="flex items-start gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                                        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${done ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"}`}>{done ? "✓" : "—"}</span>
+                                        <div className="min-w-0"><p className="text-xs font-bold text-slate-700">{label}</p><p className="mt-1 text-xs text-slate-500">{date ? formatDate(String(date)) : "Not recorded yet"}</p></div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                    <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-500">Current department</p><p className="mt-1 text-sm font-semibold text-slate-800">{complaint.department || "Not assigned yet"}</p></div>
+                                    <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-500">Latest action</p><p className="mt-1 text-sm font-semibold text-slate-800">{complaint.action_taken || "No action update recorded yet"}</p></div>
+                                  </div>
+                                  {(complaint.status || "").toLowerCase() === "rejected" && <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm font-semibold text-red-700">This complaint was rejected. See the rejection reason above.</p>}
+                                </section>
+
+                                {/* CITIZEN FEEDBACK */}
+                                <section className="mt-5 rounded-2xl border border-amber-100 bg-white p-4 sm:p-5">
+                                  <h4 className="text-sm font-extrabold text-slate-800">Your Feedback</h4>
+                                  {complaint.feedback && complaint.feedback.length > 0 ? (
+                                    <div className="mt-3 rounded-xl bg-emerald-50 p-4">
+                                      <p className="text-lg tracking-widest text-amber-500">{"★".repeat(complaint.feedback[0].rating)}<span className="text-slate-300">{"★".repeat(5 - complaint.feedback[0].rating)}</span></p>
+                                      <p className="mt-1 text-sm font-bold text-emerald-800">Feedback submitted</p>
+                                      <p className="mt-2 text-sm text-slate-700">{complaint.feedback[0].comment || "No written comment added."}</p>
+                                      <p className="mt-2 text-xs text-slate-500">{formatDate(complaint.feedback[0].created_at)}</p>
+                                    </div>
+                                  ) : (complaint.status || "").toLowerCase() === "resolved" ? (
+                                    <div className="mt-3 space-y-3">
+                                      <p className="text-sm text-slate-600">Your complaint is resolved. Rate the resolution and share a comment.</p>
+                                      <div><label className="mb-2 block text-xs font-bold text-slate-600">Rating</label><div className="flex gap-2">{[1,2,3,4,5].map((rating) => <button key={rating} type="button" aria-label={`${rating} star${rating > 1 ? "s" : ""}`} onClick={() => setFeedbackDrafts((prev) => ({ ...prev, [complaint.id]: { rating, comment: prev[complaint.id]?.comment || "" } }))} className={`text-3xl ${(feedbackDrafts[complaint.id]?.rating ?? 5) >= rating ? "text-amber-400" : "text-slate-300"}`}>★</button>)}</div></div>
+                                      <textarea value={feedbackDrafts[complaint.id]?.comment || ""} onChange={(e) => setFeedbackDrafts((prev) => ({ ...prev, [complaint.id]: { rating: prev[complaint.id]?.rating ?? 5, comment: e.target.value } }))} rows={3} maxLength={1000} placeholder="Share your experience (optional)" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400" />
+                                      {feedbackMessages[complaint.id] && <p className={`text-sm ${feedbackMessages[complaint.id].type === "error" ? "text-red-600" : "text-emerald-700"}`}>{feedbackMessages[complaint.id].text}</p>}
+                                      <button type="button" disabled={feedbackSubmittingId === complaint.id} onClick={() => submitFeedback(complaint)} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-60">{feedbackSubmittingId === complaint.id ? "Submitting..." : "Submit Feedback"}</button>
+                                    </div>
+                                  ) : <p className="mt-2 text-sm text-slate-500">Feedback will be available after the complaint is marked Resolved.</p>}
+                                </section>
+
+                              </div>
+                            )}
+
+                          </div>
+                        );
+                      }
+                    )}
                   </div>
                 )}
               </div>
-            ))}
-          </div>
-        )}
+            )}
 
-      </div>
+          {/* =================================================
+              NOTIFICATIONS
+          ================================================= */}
 
+          {activeSection ===
+            "notifications" && (
+              <div>
 
-    </main>
+                <div className="mb-5">
+                  <h3 className="text-2xl font-extrabold">
+                    Notifications
+                  </h3>
+
+                  <p className="mt-1 text-sm text-slate-500">
+                    Updates about your complaints.
+                  </p>
+                </div>
+
+                {notifications.length ===
+                  0 ? (
+                  <div className="rounded-2xl border bg-white p-10 text-center">
+                    <p className="text-4xl">
+                      🔔
+                    </p>
+
+                    <p className="mt-3 font-bold">
+                      No notifications
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {notifications.map(
+                      (notification) => (
+                        <button
+                          key={
+                            notification.id
+                          }
+                          type="button"
+                          onClick={() =>
+                            !notification.is_read &&
+                            markNotificationAsRead(
+                              notification.id
+                            )
+                          }
+                          className={`w-full rounded-2xl border p-4 text-left ${notification.is_read
+                            ? "bg-white"
+                            : "border-blue-200 bg-blue-50"
+                            }`}
+                        >
+                          <div className="flex gap-3">
+
+                            <div className="text-xl">
+                              {notification.is_read
+                                ? "🔔"
+                                : "🔵"}
+                            </div>
+
+                            <div className="flex-1">
+                              <p className="text-sm font-semibold">
+                                {
+                                  notification.message
+                                }
+                              </p>
+
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                {formatDate(
+                                  notification.created_at
+                                )}
+                              </p>
+                            </div>
+
+                          </div>
+                        </button>
+                      )
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+          {/* =================================================
+              PROFILE
+          ================================================= */}
+
+          {activeSection ===
+            "profile" && (
+              <div className="mx-auto max-w-2xl">
+
+                <h3 className="text-2xl font-extrabold">
+                  My Profile
+                </h3>
+
+                <p className="mt-1 text-sm text-slate-500">
+                  Your CivicPulse account details.
+                </p>
+
+                <div className="mt-5 rounded-2xl border bg-white p-6 shadow-sm">
+
+                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-blue-100 text-3xl">
+                    👤
+                  </div>
+
+                  <div className="mt-6 space-y-4">
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        User ID
+                      </p>
+
+                      <p className="mt-1 font-bold">
+                        {user?.id ||
+                          "Not available"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        Name
+                      </p>
+
+                      <p className="mt-1 font-bold">
+                        {user?.name ||
+                          "Not available"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        Email
+                      </p>
+
+                      <p className="mt-1 font-bold">
+                        {user?.email ||
+                          "Not available"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        Role
+                      </p>
+
+                      <p className="mt-1 font-bold capitalize">
+                        {user?.role ||
+                          "citizen"}
+                      </p>
+                    </div>
+
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+        </div>
+      </main>
+    </div>
   );
 }

@@ -1,12 +1,19 @@
 import os
 import hashlib
+from pathlib import Path
 from dotenv import load_dotenv
+
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 load_dotenv()
 
 import urllib.request
 import resend
 import urllib.parse
 import json
+import math
+import xml.etree.ElementTree as ET
+from shapely.geometry import Point, LineString
 
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -104,16 +111,368 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+# =========================
+# NEAREST PUBLIC ROAD
+# =========================
+
+def find_nearest_road(latitude: float, longitude: float):
+    """
+    Find the nearest mapped public road within 100 meters
+    using OpenStreetMap data.
+
+    Exact GPS coordinates remain the complaint location.
+    Named roads are preferred over unnamed roads.
+    """
+
+    try:
+        import math
+        import urllib.parse
+        import urllib.request
+        import xml.etree.ElementTree as ET
+        from shapely.geometry import Point, LineString
+
+        # -------------------------
+        # SEARCH AREA
+        # -------------------------
+
+        delta = 0.01
+
+        min_lon = longitude - delta
+        min_lat = latitude - delta
+        max_lon = longitude + delta
+        max_lat = latitude + delta
+
+        params = urllib.parse.urlencode({
+            "bbox": (
+                f"{min_lon},"
+                f"{min_lat},"
+                f"{max_lon},"
+                f"{max_lat}"
+            )
+        })
+
+        url = (
+            "https://api.openstreetmap.org/api/0.6/map?"
+            + params
+        )
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "CivicPulse-AI/1.0"
+            }
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=20
+        ) as response:
+            xml_data = response.read()
+
+        root = ET.fromstring(xml_data)
+
+        # -------------------------
+        # GET ROAD NAMES FROM RELATIONS
+        # -------------------------
+
+        relation_names = {}
+
+        for relation in root.findall("relation"):
+
+            relation_tags = {
+                tag.get("k"): tag.get("v")
+                for tag in relation.findall("tag")
+            }
+
+            relation_name = relation_tags.get("name")
+
+            if not relation_name:
+                continue
+
+            for member in relation.findall("member"):
+
+                if member.get("type") == "way":
+
+                    way_id = member.get("ref")
+
+                    if way_id:
+                        relation_names[way_id] = relation_name
+
+        # -------------------------
+        # BUILD NODE LOOKUP
+        # -------------------------
+
+        nodes = {}
+
+        for element in root.findall("node"):
+
+            node_id = element.get("id")
+            lat = element.get("lat")
+            lon = element.get("lon")
+
+            if node_id and lat and lon:
+                nodes[node_id] = (
+                    float(lon),
+                    float(lat)
+                )
+
+        # -------------------------
+        # PUBLIC ROAD TYPES
+        # -------------------------
+
+        road_priority = {
+            "motorway": 1,
+            "motorway_link": 2,
+            "trunk": 3,
+            "trunk_link": 4,
+            "primary": 5,
+            "primary_link": 6,
+            "secondary": 7,
+            "secondary_link": 8,
+            "tertiary": 9,
+            "tertiary_link": 10,
+            "unclassified": 11,
+            "residential": 12,
+            "living_street": 13,
+            "service": 14,
+            "road": 15,
+        }
+
+        # -------------------------
+        # GPS POINT
+        # -------------------------
+
+        gps_point = Point(0, 0)
+
+        longitude_scale = (
+            111320 * math.cos(
+                math.radians(latitude)
+            )
+        )
+
+        latitude_scale = 111320
+
+        candidates = []
+
+        # -------------------------
+        # READ OSM WAYS
+        # -------------------------
+
+        for way in root.findall("way"):
+
+            tags = {}
+
+            for tag in way.findall("tag"):
+
+                key = tag.get("k")
+                value = tag.get("v")
+
+                if key and value:
+                    tags[key] = value
+
+            highway_type = tags.get("highway")
+
+            if highway_type not in road_priority:
+                continue
+
+            way_id = way.get("id")
+
+            # -------------------------
+            # ROAD NAME
+            # -------------------------
+
+            road_name = (
+                tags.get("name")
+                or relation_names.get(way_id)
+                or "Unnamed Road"
+            )
+
+            road_ref = tags.get("ref")
+
+            # -------------------------
+            # GET ROAD COORDINATES
+            # -------------------------
+
+            coordinates = []
+
+            for nd in way.findall("nd"):
+
+                ref = nd.get("ref")
+
+                if ref in nodes:
+                    coordinates.append(nodes[ref])
+
+            if len(coordinates) < 2:
+                continue
+
+            # -------------------------
+            # CONVERT ROAD TO METERS
+            # -------------------------
+
+            meter_coordinates = []
+
+            for lon, lat in coordinates:
+
+                x = (
+                    lon - longitude
+                ) * longitude_scale
+
+                y = (
+                    lat - latitude
+                ) * latitude_scale
+
+                meter_coordinates.append(
+                    (x, y)
+                )
+
+            try:
+
+                road_geometry = LineString(
+                    meter_coordinates
+                )
+
+                distance_m = gps_point.distance(
+                    road_geometry
+                )
+
+            except Exception as e:
+
+                print(
+                    "Road geometry error:",
+                    e
+                )
+
+                continue
+
+            # -------------------------
+            # STORE ROAD CANDIDATE
+            # -------------------------
+
+            candidates.append({
+                "way_id": way_id,
+                "road": road_name,
+                "distance_m": round(
+                    float(distance_m),
+                    1
+                ),
+                "highway": highway_type,
+                "ref": road_ref,
+                "geometry": coordinates,
+                "priority": road_priority[
+                    highway_type
+                ]
+            })
+
+        # -------------------------
+        # FILTER ROADS WITHIN 100 METERS
+        # -------------------------
+
+        eligible_roads = [
+            road
+            for road in candidates
+            if road["distance_m"] <= 100
+        ]
+
+        if not eligible_roads:
+
+            return {
+                "road": None,
+                "road_type": None,
+                "road_distance_m": None,
+                "road_ref": None
+            }
+
+        # -------------------------
+        # PREFER NAMED ROADS
+        # -------------------------
+
+        named_roads = [
+            road
+            for road in eligible_roads
+            if road["road"]
+            and road["road"].strip().lower()
+            not in (
+                "unnamed road",
+                "unnamed",
+                "unknown"
+            )
+        ]
+
+        # -------------------------
+        # SELECT BEST ROAD
+        # -------------------------
+
+        if named_roads:
+
+            # Nearest road that has an actual name
+            nearest_road = min(
+                named_roads,
+                key=lambda road: road["distance_m"]
+            )
+
+        else:
+
+            # If no named road exists,
+            # use the nearest available road
+            nearest_road = min(
+                eligible_roads,
+                key=lambda road: road["distance_m"]
+            )
+
+        # -------------------------
+        # RETURN ROAD DETAILS
+        # -------------------------
+
+        return {
+            "road": nearest_road["road"],
+            "road_type": nearest_road["highway"],
+            "road_distance_m": nearest_road["distance_m"],
+            "road_ref": nearest_road["ref"]
+        }
+
+    except Exception as e:
+
+        print(
+            "OSM road lookup failed:",
+            e
+        )
+
+        return {
+            "road": None,
+            "road_type": None,
+            "road_distance_m": None,
+            "road_ref": None
+        }
+
+
+# =========================
+# REVERSE GEOCODING
+# =========================
+
 def reverse_geocode(latitude: float, longitude: float):
+    """
+    Get city, state, address and nearest road information.
+
+    Exact GPS coordinates remain the source of truth.
+    """
+
+    # -------------------------
+    # NOMINATIM REQUEST
+    # -------------------------
+
     params = urllib.parse.urlencode({
         "lat": latitude,
         "lon": longitude,
         "format": "jsonv2",
         "addressdetails": 1,
-        "zoom": 18
+        "zoom": 17,
+        "layer": "address"
     })
 
-    url = f"https://nominatim.openstreetmap.org/reverse?{params}"
+    url = (
+        f"https://nominatim.openstreetmap.org/reverse?{params}"
+    )
 
     request = urllib.request.Request(
         url,
@@ -123,21 +482,76 @@ def reverse_geocode(latitude: float, longitude: float):
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(
+            request,
+            timeout=10
+        ) as response:
+            data = json.loads(
+                response.read().decode("utf-8")
+            )
 
         address_data = data.get("address", {})
 
+               # -------------------------
+        # NEAREST ROAD LOOKUP
+        # -------------------------
+
+        nearest_road = find_nearest_road(
+            latitude,
+            longitude
+        )
+
+        road_geometry = None
+
+        if nearest_road:
+            detected_road = nearest_road["road"]
+            road_distance = nearest_road["road_distance_m"]
+            road_type = nearest_road["road_type"]
+            road_ref = nearest_road["road_ref"]
+
+        else:
+            detected_road = None
+            road_distance = None
+            road_type = None
+            road_ref = None
+
+        # -------------------------
+        # CITY / DISTRICT
+        # -------------------------
+
+        detected_city = (
+            address_data.get("city")
+            or address_data.get("town")
+            or address_data.get("village")
+            or address_data.get("municipality")
+            or address_data.get("city_district")
+            or address_data.get("suburb")
+            or address_data.get("district")
+            or address_data.get("state_district")
+            or address_data.get("county")
+        )
+
+        # -------------------------
+        # FINAL LOCATION DATA
+        # -------------------------
+
         return {
-            "road": address_data.get("road"),
-            "city": (
-                address_data.get("city")
-                or address_data.get("town")
-                or address_data.get("village")
-                or address_data.get("municipality")
-            ),
+            "road": detected_road,
+            "road_distance_m": road_distance,
+            "road_type": road_type,
+            "road_ref": road_ref,
+            "road_geometry": road_geometry,
+
+            "city": detected_city,
+
             "state": address_data.get("state"),
-            "country": address_data.get("country")
+            "country": address_data.get("country"),
+
+            "display_name": data.get("display_name"),
+
+            # Exact GPS remains the source of truth
+            "latitude": latitude,
+            "longitude": longitude
         }
 
     except Exception as e:
@@ -145,12 +559,35 @@ def reverse_geocode(latitude: float, longitude: float):
 
         return {
             "road": None,
+            "road_distance_m": None,
+            "road_type": None,
+            "road_ref": None,
+            "road_geometry": None,
+
             "city": None,
             "state": None,
-            "country": None
+            "country": None,
+            "display_name": None,
+
+            "latitude": latitude,
+            "longitude": longitude
         }
 
+
 # =========================
+# REVERSE GEOCODING API
+# =========================
+
+@app.get("/reverse-geocode")
+def reverse_geocode_api(
+    latitude: float,
+    longitude: float
+):
+    return reverse_geocode(
+        latitude,
+        longitude
+    )
+#=====================
 # YOLO MODEL
 # =========================
 
@@ -254,6 +691,12 @@ async def detect_pothole(
     image: UploadFile = File(...),
     current_user: models.User = Depends(get_current_user)
 ):
+    if current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
     upload_dir = BASE_DIR / "app" / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -466,7 +909,34 @@ def get_users(
 
     return result
 
-    # =========================
+    
+# =========================
+# GET CURRENT USER PROFILE
+# =========================
+
+@app.get("/users/me")
+def get_my_profile(
+    current_user=Depends(get_current_user),
+):
+    if current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+        )
+
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "phone": current_user.phone,
+        "role": current_user.role,
+        "city": current_user.city,
+        "address": current_user.address,
+        "profile_picture": current_user.profile_picture,
+    }
+
+
+# =========================
 # UPDATE USER
 # =========================
 
@@ -474,18 +944,18 @@ def get_users(
 def update_user(
     user_id: int,
     user_data: dict,
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
     if current_user is None:
         raise HTTPException(
             status_code=401,
-            detail="Unauthorized"
+            detail="Unauthorized",
         )
 
     if current_user.role != "admin" and current_user.id != user_id:
         raise HTTPException(
             status_code=403,
-            detail="You can only update your own profile"
+            detail="You can only update your own profile",
         )
 
     db = SessionLocal()
@@ -500,7 +970,7 @@ def update_user(
         if user is None:
             raise HTTPException(
                 status_code=404,
-                detail="User not found"
+                detail="User not found",
             )
 
         user.name = user_data.get("name", user.name)
@@ -520,8 +990,9 @@ def update_user(
                 "phone": user.phone,
                 "role": user.role,
                 "city": user.city,
-                "address": user.address
-            }
+                "address": user.address,
+                "profile_picture": user.profile_picture,
+            },
         }
 
     except HTTPException:
@@ -532,13 +1003,11 @@ def update_user(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail="Unable to update user."
+            detail="Unable to update user.",
         )
 
     finally:
         db.close()
-
-
 # =========================
 # DELETE USER
 # =========================
@@ -646,6 +1115,7 @@ async def create_complaint(
     latitude: float = Form(...),
     longitude: float = Form(...),
     address: str = Form(...),
+    landmark: str | None = Form(None),
     current_user=Depends(get_current_user),
     image: UploadFile = File(None)
 ):
@@ -672,11 +1142,19 @@ async def create_complaint(
     # =========================
 
     location_data = reverse_geocode(latitude, longitude)
+    print(
+    "COMPLAINT ROAD VALUES:",
+    location_data.get("road"),
+    location_data.get("road_type"),
+    location_data.get("road_distance_m")
+)
 
     road = location_data["road"]
     city = location_data["city"]
     state = location_data["state"]
     country = location_data["country"]
+    road_type = location_data.get("road_type")
+    road_distance_m = location_data.get("road_distance_m")
 
        # =========================
     # SAVE IMAGE
@@ -912,28 +1390,46 @@ async def create_complaint(
             )
         )
 
-     # =========================
+    # =========================
     # CREATE COMPLAINT RECORD
     # =========================
 
     complaint = models.Complaint(
+
         user_id=current_user.id,
+
         title=title,
+
         description=description,
+
         category=category,
+
         latitude=latitude,
+
         longitude=longitude,
+
         address=address,
 
+        landmark=landmark,
+
         road=road,
+
         city=city,
+
         state=state,
+
         country=country,
 
+        road_type=road_type,
+
+        road_distance_m=road_distance_m,
+
         image_url=image_url,
+
         image_hash=image_hash,
 
         status="pending",
+
         priority=priority,
 
         pothole_count=pothole_count,
@@ -944,7 +1440,9 @@ async def create_complaint(
         ),
 
         ai_detected=ai_detected,
+
         ai_detection_type=ai_detection_type,
+
         ai_detection_count=ai_detection_count,
 
         ai_detections=(
@@ -953,8 +1451,49 @@ async def create_complaint(
             else None
         )
     )
+    # =========================
+    # SAVE COMPLAINT + NOTIFICATIONS
+    # =========================
 
     db.add(complaint)
+    db.flush()
+
+    # 1. Notify the citizen who submitted the complaint
+    create_notification(
+        db=db,
+        user_id=current_user.id,
+        complaint_id=complaint.id,
+        message=(
+            f"Your complaint #{complaint.id} has been submitted "
+            "successfully and is pending review."
+        ),
+        notification_type="complaint_submitted",
+    )
+
+    # 2. Notify all administrators about the new complaint
+    admin_users = (
+        db.query(models.User)
+        .filter(models.User.role == "admin")
+        .all()
+    )
+    
+
+    for admin in admin_users:
+        # Avoid sending the same notification to the same user
+        if admin.id == current_user.id:
+            continue
+
+        create_notification(
+            db=db,
+            user_id=admin.id,
+            complaint_id=complaint.id,
+            message=(
+                f"New complaint #{complaint.id} submitted: "
+                f"{complaint.title}. Please review it."
+            ),
+            notification_type="new_complaint",
+        )
+
     db.commit()
     db.refresh(complaint)
 
@@ -968,7 +1507,7 @@ async def create_complaint(
         "ai_detection_type": complaint.ai_detection_type,
         "ai_detection_count": complaint.ai_detection_count,
         "pothole_count": complaint.pothole_count,
-        "ai_confidence": complaint.ai_confidence
+        "ai_confidence": complaint.ai_confidence,
     }
 
 # =========================
@@ -1021,10 +1560,13 @@ def get_complaints(
             "latitude": complaint.latitude,
             "longitude": complaint.longitude,
             "address": complaint.address,
+            "landmark": complaint.landmark,
             "road": complaint.road,
             "city": complaint.city,
             "state": complaint.state,
             "country": complaint.country,
+            "road_type": complaint.road_type,
+            "road_distance_m": complaint.road_distance_m,
             "image_url": complaint.image_url,
             "status": complaint.status,
             "priority": complaint.priority,
@@ -1537,6 +2079,7 @@ def get_complaint_statistics(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+
     if current_user is None:
         raise HTTPException(
             status_code=401,
@@ -2081,8 +2624,8 @@ def delete_complaint(
             detail="Complaint not found"
         )
 
-        if complaint.user_id != current_user.id and current_user.role != "admin":
-            raise HTTPException(
+    if complaint.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(
             status_code=403,
             detail="You are not authorized to delete this complaint"
         )
@@ -2092,6 +2635,9 @@ def delete_complaint(
             status_code=400,
             detail="Resolved or rejected complaints cannot be deleted"
         )
+
+    db.query(models.Notification).filter(models.Notification.complaint_id == complaint_id).delete()
+    db.query(models.Feedback).filter(models.Feedback.complaint_id == complaint_id).delete()
 
     db.delete(complaint)
     db.commit()
@@ -2127,9 +2673,7 @@ def login(data: LoginRequest):
             "message": "Invalid email or password"
         }
 
-    access_token = create_access_token({
-        "user_id": user.id
-    })
+    access_token = create_access_token({}, user_id=user.id)
 
     db.close()
 
@@ -2168,9 +2712,7 @@ def login_for_swagger(
             detail="Invalid email or password"
         )
 
-    access_token = create_access_token({
-        "user_id": user.id
-    })
+    access_token = create_access_token({}, user_id=user.id)
 
     return {
         "access_token": access_token,
@@ -2417,6 +2959,8 @@ def get_my_notifications(
             detail="Unauthorized"
         )
 
+    print("NOTIFICATION USER ID:", current_user.id)
+
     notifications = (
         db.query(models.Notification)
         .filter(
@@ -2439,31 +2983,17 @@ def get_my_notifications(
         }
         for notification in notifications
     ]
+# =========================
+# MARK NOTIFICATION AS READ
+# =========================
 
-@app.patch("/notifications/read-all")
-def mark_all_notifications_as_read(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    notifications = (
-        db.query(models.Notification)
-        .filter(
-            models.Notification.user_id == current_user.id,
-            models.Notification.is_read == False,
-        )
-        .all()
-    )
 
-    for notification in notifications:
-        notification.is_read = True
+# =========================
+# MARK NOTIFICATION AS READ
+# =========================
 
-    db.commit()
-
-    return {
-        "message": "All notifications marked as read",
-        "updated_count": len(notifications),
-    }
-def mark_notification_as_read(
+@app.patch("/notifications/{notification_id}/read")
+def mark_notification_read(
     notification_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -2477,7 +3007,7 @@ def mark_notification_as_read(
         .first()
     )
 
-    if not notification:
+    if notification is None:
         raise HTTPException(
             status_code=404,
             detail="Notification not found",
@@ -2495,46 +3025,25 @@ def mark_notification_as_read(
 
 
 # =========================
-# MARK NOTIFICATION AS READ
+# MARK ALL NOTIFICATIONS AS READ
 # =========================
 
-@app.patch("/notifications/{notification_id}/read")
-def mark_notification_read(
-    notification_id: int,
+@app.patch("/notifications/read-all")
+def mark_all_notifications_read(
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user),
 ):
-    if current_user is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-    notification = (
-        db.query(models.Notification)
-        .filter(
-            models.Notification.id == notification_id,
-            models.Notification.user_id == current_user.id
-        )
-        .first()
+    db.query(models.Notification).filter(
+        models.Notification.user_id == current_user.id,
+        models.Notification.is_read == False,
+    ).update(
+        {models.Notification.is_read: True},
+        synchronize_session=False,
     )
 
-    if notification is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Notification not found"
-        )
-
-    notification.is_read = True
-
     db.commit()
-    db.refresh(notification)
 
-    return {
-        "message": "Notification marked as read",
-        "notification_id": notification.id,
-        "is_read": notification.is_read
-    }
+    return {"message": "All notifications marked as read"}
 
     # =========================
 # SUBMIT FEEDBACK
@@ -2775,13 +3284,25 @@ def change_password(
     return {
         "message": "Password changed successfully"
     }
-    @app.get("/admin/analytics")
-    def get_admin_analytics(
+
+
+# =========================================================
+# ADMIN ANALYTICS — ROOT
+# =========================================================
+
+@app.get("/admin/analytics")
+def get_admin_analytics(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-        if current_user.role != "admin":
-            raise HTTPException(
+    if current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
+    if current_user.role != "admin":
+        raise HTTPException(
             status_code=403,
             detail="Admin access required"
         )
