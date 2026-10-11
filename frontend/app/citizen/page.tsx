@@ -7,6 +7,13 @@ import {
   useRef,
   useState,
 } from "react";
+import dynamic from "next/dynamic";
+const LocationPicker = dynamic(
+  () => import("@/components/LocationPicker"),
+  { ssr: false }
+);
+
+
 
 type Complaint = {
   id: number;
@@ -30,7 +37,13 @@ type Complaint = {
   assigned_to?: number | null;
   rejection_reason?: string | null;
   action_taken?: string | null;
+  verified_at?: string | null;
+  department_assigned_at?: string | null;
+  officer_assigned_at?: string | null;
+  in_progress_at?: string | null;
+  action_taken_at?: string | null;
   resolved_at?: string | null;
+  feedback?: { id: number; rating: number; comment?: string | null; user_id: number; created_at: string }[];
   created_at?: string | null;
   updated_at?: string | null;
 };
@@ -134,6 +147,10 @@ export default function CitizenDashboard() {
 
   const [expandedId, setExpandedId] =
     useState<number | null>(null);
+
+  const [feedbackDrafts, setFeedbackDrafts] = useState<Record<number, { rating: number; comment: string }>>({});
+  const [feedbackSubmittingId, setFeedbackSubmittingId] = useState<number | null>(null);
+  const [feedbackMessages, setFeedbackMessages] = useState<Record<number, { type: "success" | "error"; text: string }>>({});
 
   /* =====================================================
      USER
@@ -278,6 +295,11 @@ export default function CitizenDashboard() {
         );
         return;
       }
+      if (data.role !== "citizen") {
+        window.location.href = "/";
+
+        return;
+      }
 
       setUser(data);
     } catch (error) {
@@ -337,8 +359,8 @@ export default function CitizenDashboard() {
       const result = Array.isArray(data)
         ? data
         : Array.isArray(data?.complaints)
-        ? data.complaints
-        : [];
+          ? data.complaints
+          : [];
 
       setComplaints(result);
     } catch (error) {
@@ -348,6 +370,41 @@ export default function CitizenDashboard() {
       );
 
       setComplaints([]);
+    }
+  };
+
+  /* =====================================================
+     SUBMIT CITIZEN FEEDBACK
+  ===================================================== */
+
+  const submitFeedback = async (complaint: Complaint) => {
+    const token = getToken();
+    const draft = feedbackDrafts[complaint.id] || { rating: 5, comment: "" };
+    if (!token) {
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "error", text: "Please log in again to submit feedback." } }));
+      return;
+    }
+    if (draft.rating < 1 || draft.rating > 5) {
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "error", text: "Please select a rating from 1 to 5." } }));
+      return;
+    }
+    setFeedbackSubmittingId(complaint.id);
+    setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "success", text: "Submitting feedback..." } }));
+    try {
+      const response = await fetch(`${API_BASE_URL}/complaints/${complaint.id}/feedback`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ rating: draft.rating, comment: draft.comment.trim() || null }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Could not submit feedback.");
+      const newFeedback = { id: data.feedback_id, rating: data.rating, comment: data.comment, user_id: user?.id ?? 0, created_at: data.created_at };
+      setComplaints((prev) => prev.map((item) => item.id === complaint.id ? { ...item, feedback: [...(item.feedback || []), newFeedback] } : item));
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "success", text: "Thank you! Your feedback has been submitted." } }));
+    } catch (error) {
+      setFeedbackMessages((prev) => ({ ...prev, [complaint.id]: { type: "error", text: error instanceof Error ? error.message : "Could not submit feedback." } }));
+    } finally {
+      setFeedbackSubmittingId(null);
     }
   };
 
@@ -395,8 +452,8 @@ export default function CitizenDashboard() {
       const result = Array.isArray(data)
         ? data
         : Array.isArray(data?.notifications)
-        ? data.notifications
-        : [];
+          ? data.notifications
+          : [];
 
       setNotifications(result);
     } catch (error) {
@@ -458,7 +515,7 @@ export default function CitizenDashboard() {
           if (!response.ok) {
             throw new Error(
               data?.detail ||
-                "Unable to fetch location details."
+              "Unable to fetch location details."
             );
           }
 
@@ -585,7 +642,7 @@ export default function CitizenDashboard() {
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
-      } catch {}
+      } catch { }
     }
 
     const recognition =
@@ -651,6 +708,83 @@ export default function CitizenDashboard() {
     }
   };
 
+
+  const handleMapLocationSelect = async (
+    lat: number,
+    lng: number
+  ) => {
+    // Invalid coordinates reject karo.
+    if (
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      lat < 6.5 ||
+      lat > 37.6 ||
+      lng < 68 ||
+      lng > 97.5
+    ) {
+      setLocationError(
+        "Please select a valid location within India."
+      );
+      return;
+    }
+
+    setLatitude(lat);
+    setLongitude(lng);
+    setLocationError("");
+    setLocationLoading(true);
+
+    // Purana address clear karo, taaki galat address na dikhe.
+    setAddress("");
+    setRoad("");
+    setRoadType("");
+    setRoadDistance(null);
+    setCity("");
+    setState("");
+
+    try {
+      const params = new URLSearchParams({
+        latitude: String(lat),
+        longitude: String(lng),
+      });
+
+      const response = await fetch(
+        `${API_BASE_URL}/reverse-geocode?${params.toString()}`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Address lookup failed: ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      if (
+        !data ||
+        typeof data !== "object" ||
+        !data.display_name
+      ) {
+        throw new Error("Address not found for these coordinates.");
+      }
+
+      setAddress(data.display_name);
+      setRoad(data.road || "");
+      setRoadType(data.road_type || "");
+      setRoadDistance(data.road_distance_m ?? null);
+      setCity(data.city || "");
+      setState(data.state || "");
+    } catch (error) {
+      console.error("Map location lookup failed:", error);
+
+      setLocationError(
+        "Coordinates selected, but address lookup failed. Please try again."
+      );
+    } finally {
+      setLocationLoading(false);
+    }
+  };
+
+
   /* =====================================================
      SUBMIT COMPLAINT
   ===================================================== */
@@ -677,17 +811,17 @@ export default function CitizenDashboard() {
       return;
     }
 
+
     if (
       latitude === null ||
       longitude === null
     ) {
       setSubmitError(
-        "Location is required. Please click Detect My Location."
+        "Please select the complaint location on the map or detect your location before submitting."
       );
-
-      detectLocation();
       return;
     }
+
 
     const token = getToken();
 
@@ -806,8 +940,8 @@ export default function CitizenDashboard() {
       if (!response.ok) {
         throw new Error(
           data?.detail ||
-            data?.message ||
-            "Complaint submission failed."
+          data?.message ||
+          "Complaint submission failed."
         );
       }
 
@@ -882,11 +1016,11 @@ export default function CitizenDashboard() {
             (old) =>
               old.map((item) =>
                 item.id ===
-                notificationId
+                  notificationId
                   ? {
-                      ...item,
-                      is_read: true,
-                    }
+                    ...item,
+                    is_read: true,
+                  }
                   : item
               )
           );
@@ -1002,7 +1136,7 @@ export default function CitizenDashboard() {
                 a.created_at || 0
               ).getTime()
           )
-          .slice(0, 5),
+          ,
       [complaints]
     );
 
@@ -1128,11 +1262,10 @@ export default function CitizenDashboard() {
                         key as Section
                       )
                     }
-                    className={`w-full rounded-xl px-4 py-3 text-left text-sm font-bold ${
-                      activeSection === key
-                        ? "bg-blue-600 text-white"
-                        : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`w-full rounded-xl px-4 py-3 text-left text-sm font-bold ${activeSection === key
+                      ? "bg-blue-600 text-white"
+                      : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     {label}
                   </button>
@@ -1173,18 +1306,17 @@ export default function CitizenDashboard() {
                     key as Section
                   )
                 }
-                className={`w-full rounded-xl px-4 py-3 text-left text-sm font-bold ${
-                  activeSection === key
-                    ? "bg-blue-600 text-white shadow-sm"
-                    : "text-slate-600 hover:bg-slate-100"
-                }`}
+                className={`w-full rounded-xl px-4 py-3 text-left text-sm font-bold ${activeSection === key
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "text-slate-600 hover:bg-slate-100"
+                  }`}
               >
                 {label}
 
                 {key ===
                   "notifications" &&
                   unreadNotifications >
-                    0 && (
+                  0 && (
                     <span className="float-right rounded-full bg-red-500 px-2 py-0.5 text-[10px] text-white">
                       {unreadNotifications}
                     </span>
@@ -1242,659 +1374,23 @@ export default function CitizenDashboard() {
 
           {activeSection ===
             "dashboard" && (
-            <div className="space-y-5">
+              <div className="space-y-5">
 
-              <div className="rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 p-6 text-white shadow-lg">
-                <p className="text-sm text-blue-100">
-                  Welcome back 👋
-                </p>
+                <div className="rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 p-6 text-white shadow-lg">
+                  <p className="text-sm text-blue-100">
+                    Welcome back 👋
+                  </p>
 
-                <h3 className="mt-1 text-2xl font-extrabold">
-                  {user?.name ||
-                    "Citizen"}
-                </h3>
-
-                <p className="mt-2 max-w-2xl text-sm text-blue-100">
-                  Report civic problems,
-                  track your complaints,
-                  and stay updated with
-                  every action.
-                </p>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    changeSection(
-                      "submit"
-                    )
-                  }
-                  className="mt-5 rounded-xl bg-white px-5 py-3 text-sm font-extrabold text-blue-600"
-                >
-                  + Submit Complaint
-                </button>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-
-                {[
-                  [
-                    "Total",
-                    total,
-                    "📋",
-                    "text-slate-900",
-                  ],
-                  [
-                    "Pending",
-                    pending,
-                    "⏳",
-                    "text-yellow-600",
-                  ],
-                  [
-                    "Verified",
-                    verified,
-                    "🔎",
-                    "text-blue-600",
-                  ],
-                  [
-                    "Assigned",
-                    assigned,
-                    "👨‍💼",
-                    "text-purple-600",
-                  ],
-                  [
-                    "In Progress",
-                    inProgress,
-                    "🔧",
-                    "text-orange-600",
-                  ],
-                  [
-                    "Resolved",
-                    resolved,
-                    "✅",
-                    "text-green-600",
-                  ],
-                ].map(
-                  (item) => (
-                    <div
-                      key={item[0]}
-                      className="rounded-xl border bg-white p-4 shadow-sm"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xl">
-                          {item[2]}
-                        </span>
-
-                        <span className="text-xs text-slate-400">
-                          {item[0]}
-                        </span>
-                      </div>
-
-                      <p
-                        className={`mt-3 text-2xl font-extrabold ${item[3]}`}
-                      >
-                        {item[1]}
-                      </p>
-
-                      <p className="text-xs text-slate-500">
-                        {item[0]} complaints
-                      </p>
-                    </div>
-                  )
-                )}
-              </div>
-
-              <div className="grid gap-5 lg:grid-cols-2">
-
-                <div className="rounded-2xl border bg-white p-5 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-extrabold">
-                      Recent Complaints
-                    </h3>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        changeSection(
-                          "complaints"
-                        )
-                      }
-                      className="text-xs font-bold text-blue-600"
-                    >
-                      View All
-                    </button>
-                  </div>
-
-                  <div className="mt-4 space-y-3">
-                    {latestComplaints.length ===
-                    0 ? (
-                      <p className="py-8 text-center text-sm text-slate-400">
-                        No complaints yet.
-                      </p>
-                    ) : (
-                      latestComplaints.map(
-                        (complaint) => (
-                          <div
-                            key={
-                              complaint.id
-                            }
-                            className="rounded-xl border p-4"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="font-bold">
-                                  {
-                                    complaint.title
-                                  }
-                                </p>
-
-                                <p className="mt-1 text-xs text-slate-500">
-                                  Complaint #
-                                  {
-                                    complaint.id
-                                  }
-                                </p>
-                              </div>
-
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${statusClass(
-                                  complaint.status
-                                )}`}
-                              >
-                                {formatStatus(
-                                  complaint.status
-                                )}
-                              </span>
-                            </div>
-                          </div>
-                        )
-                      )
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border bg-white p-5 shadow-sm">
-                  <h3 className="font-extrabold">
-                    Quick Actions
+                  <h3 className="mt-1 text-2xl font-extrabold">
+                    {user?.name ||
+                      "Citizen"}
                   </h3>
 
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        changeSection(
-                          "submit"
-                        )
-                      }
-                      className="rounded-xl bg-blue-600 p-4 text-left text-white"
-                    >
-                      <p className="text-lg">
-                        📝
-                      </p>
-
-                      <p className="mt-2 font-bold">
-                        Report Problem
-                      </p>
-
-                      <p className="mt-1 text-xs text-blue-100">
-                        Submit a new civic
-                        complaint.
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        changeSection(
-                          "notifications"
-                        )
-                      }
-                      className="rounded-xl bg-slate-100 p-4 text-left"
-                    >
-                      <p className="text-lg">
-                        🔔
-                      </p>
-
-                      <p className="mt-2 font-bold">
-                        Notifications
-                      </p>
-
-                      <p className="mt-1 text-xs text-slate-500">
-                        {unreadNotifications}{" "}
-                        unread updates.
-                      </p>
-                    </button>
-
-                  </div>
-                </div>
-
-              </div>
-            </div>
-          )}
-
-          {/* =================================================
-              SUBMIT
-          ================================================= */}
-
-          {activeSection ===
-            "submit" && (
-            <div className="mx-auto max-w-3xl">
-
-              <div className="mb-5">
-                <h3 className="text-2xl font-extrabold">
-                  Submit Complaint
-                </h3>
-
-                <p className="mt-1 text-sm text-slate-500">
-                  Tell us about the civic
-                  problem. You can type or
-                  speak the title and
-                  description.
-                </p>
-              </div>
-
-              {submitMessage && (
-                <div className="mb-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm font-semibold text-green-700">
-                  ✅ {submitMessage}
-                </div>
-              )}
-
-              {submitError && (
-                <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
-                  ⚠️ {submitError}
-                </div>
-              )}
-
-              <form
-                onSubmit={
-                  handleComplaintSubmit
-                }
-                className="space-y-5 rounded-2xl border bg-white p-5 shadow-sm sm:p-6"
-              >
-
-                {/* TITLE */}
-
-                <div>
-                  <label className="mb-2 block text-sm font-bold">
-                    Complaint Title *
-                  </label>
-
-                  <div className="flex gap-2">
-                    <input
-                      value={title}
-                      onChange={(e) =>
-                        setTitle(
-                          e.target.value
-                        )
-                      }
-                      placeholder="Example: Large pothole on main road"
-                      className="flex-1 rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
-                    />
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        startVoiceInput(
-                          "title"
-                        )
-                      }
-                      className={`rounded-xl px-4 text-lg ${
-                        listeningField ===
-                        "title"
-                          ? "bg-red-500 text-white"
-                          : "bg-blue-50 text-blue-600"
-                      }`}
-                    >
-                      {listeningField ===
-                      "title"
-                        ? "⏹"
-                        : "🎤"}
-                    </button>
-                  </div>
-
-                  <p className="mt-1 text-[11px] text-slate-400">
-                    Type it or click 🎤 and
-                    speak.
-                  </p>
-                </div>
-
-                {/* DESCRIPTION */}
-
-                <div>
-                  <label className="mb-2 block text-sm font-bold">
-                    Description *
-                  </label>
-
-                  <div className="flex gap-2">
-                    <textarea
-                      value={description}
-                      onChange={(e) =>
-                        setDescription(
-                          e.target.value
-                        )
-                      }
-                      rows={5}
-                      placeholder="Describe the problem..."
-                      className="flex-1 resize-none rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
-                    />
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        startVoiceInput(
-                          "description"
-                        )
-                      }
-                      className={`h-12 rounded-xl px-4 text-lg ${
-                        listeningField ===
-                        "description"
-                          ? "bg-red-500 text-white"
-                          : "bg-blue-50 text-blue-600"
-                      }`}
-                    >
-                      {listeningField ===
-                      "description"
-                        ? "⏹"
-                        : "🎤"}
-                    </button>
-                  </div>
-
-                  <p className="mt-1 text-[11px] text-slate-400">
-                    Type or use voice input.
-                  </p>
-                </div>
-
-                {/* CATEGORY */}
-
-                <div>
-                  <label className="mb-2 block text-sm font-bold">
-                    Category
-                  </label>
-
-                  <select
-                    value={category}
-                    onChange={(e) =>
-                      setCategory(
-                        e.target.value
-                      )
-                    }
-                    className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500"
-                  >
-                    <option>
-                      Road Damage
-                    </option>
-
-                    <option>
-                      Garbage
-                    </option>
-
-                    <option>
-                      Street Light
-                    </option>
-
-                    <option>
-                      Water Supply
-                    </option>
-
-                    <option>
-                      Drainage
-                    </option>
-
-                    <option>
-                      Traffic
-                    </option>
-
-                    <option>
-                      Other
-                    </option>
-                  </select>
-                </div>
-
-                {/* IMAGE */}
-
-                <div>
-                  <label className="mb-2 block text-sm font-bold">
-                    Problem Image
-                  </label>
-
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) =>
-                      setImage(
-                        e.target.files?.[0] ||
-                          null
-                      )
-                    }
-                    className="w-full rounded-xl border border-slate-300 p-3 text-sm"
-                  />
-
-                  {image && (
-                    <p className="mt-2 text-xs text-green-600">
-                      Selected:{" "}
-                      {image.name}
-                    </p>
-                  )}
-                </div>
-
-                {/* LANDMARK */}
-
-                <div>
-                  <label className="mb-2 block text-sm font-bold">
-                    Landmark
-                  </label>
-
-                  <input
-                    value={landmark}
-                    onChange={(e) =>
-                      setLandmark(
-                        e.target.value
-                      )
-                    }
-                    placeholder="Example: Near college gate"
-                    className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
-                  />
-                </div>
-
-                {/* LOCATION */}
-
-                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
-
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <h4 className="font-extrabold text-blue-900">
-                        📍 Complaint Location
-                      </h4>
-
-                      <p className="mt-1 text-xs text-blue-700">
-                        Your location is
-                        detected automatically
-                        when this page opens.
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={
-                        detectLocation
-                      }
-                      disabled={
-                        locationLoading
-                      }
-                      className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
-                    >
-                      {locationLoading
-                        ? "Detecting..."
-                        : "📍 Detect My Location"}
-                    </button>
-                  </div>
-
-                  {locationError && (
-                    <div className="mt-3 rounded-xl bg-red-50 p-3 text-xs font-semibold text-red-600">
-                      {locationError}
-                    </div>
-                  )}
-
-                  {latitude !== null &&
-                    longitude !==
-                      null && (
-                      <div className="mt-4 space-y-3">
-
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <div className="rounded-xl bg-white p-3">
-                            <p className="text-[10px] text-slate-400">
-                              Latitude
-                            </p>
-
-                            <p className="text-sm font-bold">
-                              {latitude}
-                            </p>
-                          </div>
-
-                          <div className="rounded-xl bg-white p-3">
-                            <p className="text-[10px] text-slate-400">
-                              Longitude
-                            </p>
-
-                            <p className="text-sm font-bold">
-                              {longitude}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="rounded-xl bg-white p-3">
-                          <p className="text-[10px] text-slate-400">
-                            Address
-                          </p>
-
-                          <p className="mt-1 text-sm font-semibold">
-                            {address ||
-                              "Address not available"}
-                          </p>
-                        </div>
-
-                        <div className="grid gap-3 sm:grid-cols-3">
-                          <div className="rounded-xl bg-white p-3">
-                            <p className="text-[10px] text-slate-400">
-                              Road
-                            </p>
-
-                            <p className="text-xs font-bold">
-                              {road ||
-                                "Not available"}
-                            </p>
-                          </div>
-
-                          <div className="rounded-xl bg-white p-3">
-                            <p className="text-[10px] text-slate-400">
-                              City
-                            </p>
-
-                            <p className="text-xs font-bold">
-                              {city ||
-                                "Not available"}
-                            </p>
-                          </div>
-
-                          <div className="rounded-xl bg-white p-3">
-                            <p className="text-[10px] text-slate-400">
-                              State
-                            </p>
-
-                            <p className="text-xs font-bold">
-                              {state ||
-                                "Not available"}
-                            </p>
-                          </div>
-                        </div>
-
-                        {roadDistance !==
-                          null && (
-                          <p className="text-xs text-blue-700">
-                            Road distance:
-                            {" "}
-                            {roadDistance}
-                            {" "}
-                            meters
-                          </p>
-                        )}
-
-                        <a
-                          href={`https://www.google.com/maps?q=${latitude},${longitude}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-block text-xs font-bold text-blue-600 underline"
-                        >
-                          Open location in
-                          Google Maps →
-                        </a>
-                      </div>
-                    )}
-                </div>
-
-                {/* SUBMIT */}
-
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="w-full rounded-xl bg-blue-600 px-5 py-4 text-sm font-extrabold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {submitting
-                    ? "Submitting Complaint..."
-                    : "🚀 Submit Complaint"}
-                </button>
-
-              </form>
-            </div>
-          )}
-
-          {/* =================================================
-              COMPLAINTS
-          ================================================= */}
-
-          {activeSection ===
-            "complaints" && (
-            <div>
-
-              <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h3 className="text-2xl font-extrabold">
-                    My Complaints
-                  </h3>
-
-                  <p className="mt-1 text-sm text-slate-500">
-                    Track all your submitted
-                    complaints.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setLoading(true);
-                    await fetchComplaints();
-                    setLoading(false);
-                  }}
-                  className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white"
-                >
-                  🔄 Refresh
-                </button>
-              </div>
-
-              {complaints.length ===
-              0 ? (
-                <div className="rounded-2xl border bg-white p-10 text-center shadow-sm">
-                  <p className="text-4xl">
-                    📋
-                  </p>
-
-                  <h4 className="mt-3 font-extrabold">
-                    No complaints yet
-                  </h4>
-
-                  <p className="mt-1 text-sm text-slate-500">
-                    Submit your first civic
-                    complaint.
+                  <p className="mt-2 max-w-2xl text-sm text-blue-100">
+                    Report civic problems,
+                    track your complaints,
+                    and stay updated with
+                    every action.
                   </p>
 
                   <button
@@ -1904,290 +1400,978 @@ export default function CitizenDashboard() {
                         "submit"
                       )
                     }
-                    className="mt-5 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white"
+                    className="mt-5 rounded-xl bg-white px-5 py-3 text-sm font-extrabold text-blue-600"
                   >
-                    Submit Complaint
+                    + Submit Complaint
                   </button>
                 </div>
-              ) : (
-                <div className="space-y-4">
-                  {complaints.map(
-                    (complaint) => {
-                      const imageUrl =
-                        getImageUrl(
-                          complaint.image_url
-                        );
 
-                      const expanded =
-                        expandedId ===
-                        complaint.id;
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
 
-                      return (
-                        <div
-                          key={
-                            complaint.id
-                          }
-                          className="overflow-hidden rounded-2xl border bg-white shadow-sm"
+                  {[
+                    [
+                      "Total",
+                      total,
+                      "📋",
+                      "text-slate-900",
+                    ],
+                    [
+                      "Pending",
+                      pending,
+                      "⏳",
+                      "text-yellow-600",
+                    ],
+                    [
+                      "Verified",
+                      verified,
+                      "🔎",
+                      "text-blue-600",
+                    ],
+                    [
+                      "Assigned",
+                      assigned,
+                      "👨‍💼",
+                      "text-purple-600",
+                    ],
+                    [
+                      "In Progress",
+                      inProgress,
+                      "🔧",
+                      "text-orange-600",
+                    ],
+                    [
+                      "Resolved",
+                      resolved,
+                      "✅",
+                      "text-green-600",
+                    ],
+                  ].map(
+                    (item) => (
+                      <div
+                        key={item[0]}
+                        className="rounded-xl border bg-white p-4 shadow-sm"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xl">
+                            {item[2]}
+                          </span>
+
+                          <span className="text-xs text-slate-400">
+                            {item[0]}
+                          </span>
+                        </div>
+
+                        <p
+                          className={`mt-3 text-2xl font-extrabold ${item[3]}`}
                         >
+                          {item[1]}
+                        </p>
 
-                          <div className="p-5">
-                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <p className="text-xs text-slate-500">
+                          {item[0]} complaints
+                        </p>
+                      </div>
+                    )
+                  )}
+                </div>
 
-                              <div>
-                                <p className="text-xs font-bold text-slate-400">
-                                  Complaint #
-                                  {
-                                    complaint.id
-                                  }
-                                </p>
+                <div className="grid gap-5 lg:grid-cols-2">
 
-                                <h4 className="mt-1 text-lg font-extrabold">
-                                  {
-                                    complaint.title
-                                  }
-                                </h4>
+                  <div className="rounded-2xl border bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-extrabold">
+                        Recent Complaints
+                      </h3>
 
-                                <p className="mt-1 text-xs text-slate-500">
-                                  {formatDate(
-                                    complaint.created_at
-                                  )}
-                                </p>
-                              </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          changeSection(
+                            "complaints"
+                          )
+                        }
+                        className="text-xs font-bold text-blue-600"
+                      >
+                        View All
+                      </button>
+                    </div>
 
-                              <span
-                                className={`w-fit rounded-full px-3 py-1.5 text-xs font-bold ${statusClass(
-                                  complaint.status
-                                )}`}
-                              >
-                                {formatStatus(
-                                  complaint.status
-                                )}
-                              </span>
-                            </div>
-
-                            <p className="mt-4 text-sm leading-6 text-slate-600">
-                              {
-                                complaint.description
+                    <div className="mt-4 space-y-3">
+                      {latestComplaints.length ===
+                        0 ? (
+                        <p className="py-8 text-center text-sm text-slate-400">
+                          No complaints yet.
+                        </p>
+                      ) : (
+                        latestComplaints.map(
+                          (complaint) => (
+                            <div
+                              key={
+                                complaint.id
                               }
-                            </p>
-
-                            <div className="mt-4 grid gap-3 sm:grid-cols-3">
-
-                              <div className="rounded-xl bg-slate-50 p-3">
-                                <p className="text-[10px] text-slate-400">
-                                  Category
-                                </p>
-
-                                <p className="mt-1 text-xs font-bold">
-                                  {
-                                    complaint.category ||
-                                    "Not assigned"
-                                  }
-                                </p>
-                              </div>
-
-                              <div className="rounded-xl bg-slate-50 p-3">
-                                <p className="text-[10px] text-slate-400">
-                                  Priority
-                                </p>
-
-                                <p className="mt-1 text-xs font-bold">
-                                  {
-                                    complaint.priority ||
-                                    "Not assigned"
-                                  }
-                                </p>
-                              </div>
-
-                              <div className="rounded-xl bg-slate-50 p-3">
-                                <p className="text-[10px] text-slate-400">
-                                  Department
-                                </p>
-
-                                <p className="mt-1 text-xs font-bold">
-                                  {
-                                    complaint.department ||
-                                    "Not assigned"
-                                  }
-                                </p>
-                              </div>
-
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExpandedId(
-                                  expanded
-                                    ? null
-                                    : complaint.id
-                                )
-                              }
-                              className="mt-4 text-xs font-bold text-blue-600"
+                              className="rounded-xl border p-4"
                             >
-                              {expanded
-                                ? "Hide Details ↑"
-                                : "View Details ↓"}
-                            </button>
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="font-bold">
+                                    {
+                                      complaint.title
+                                    }
+                                  </p>
+
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    Complaint #
+                                    {
+                                      complaint.id
+                                    }
+                                  </p>
+                                </div>
+
+                                <span
+                                  className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${statusClass(
+                                    complaint.status
+                                  )}`}
+                                >
+                                  {formatStatus(
+                                    complaint.status
+                                  )}
+                                </span>
+                              </div>
+                            </div>
+                          )
+                        )
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border bg-white p-5 shadow-sm">
+                    <h3 className="font-extrabold">
+                      Quick Actions
+                    </h3>
+
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          changeSection(
+                            "submit"
+                          )
+                        }
+                        className="rounded-xl bg-blue-600 p-4 text-left text-white"
+                      >
+                        <p className="text-lg">
+                          📝
+                        </p>
+
+                        <p className="mt-2 font-bold">
+                          Report Problem
+                        </p>
+
+                        <p className="mt-1 text-xs text-blue-100">
+                          Submit a new civic
+                          complaint.
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          changeSection(
+                            "notifications"
+                          )
+                        }
+                        className="rounded-xl bg-slate-100 p-4 text-left"
+                      >
+                        <p className="text-lg">
+                          🔔
+                        </p>
+
+                        <p className="mt-2 font-bold">
+                          Notifications
+                        </p>
+
+                        <p className="mt-1 text-xs text-slate-500">
+                          {unreadNotifications}{" "}
+                          unread updates.
+                        </p>
+                      </button>
+
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+          {/* =================================================
+              SUBMIT
+          ================================================= */}
+
+          {activeSection ===
+            "submit" && (
+              <div className="mx-auto max-w-3xl">
+
+                <div className="mb-5">
+                  <h3 className="text-2xl font-extrabold">
+                    Submit Complaint
+                  </h3>
+
+                  <p className="mt-1 text-sm text-slate-500">
+                    Tell us about the civic
+                    problem. You can type or
+                    speak the title and
+                    description.
+                  </p>
+                </div>
+
+                {submitMessage && (
+                  <div className="mb-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm font-semibold text-green-700">
+                    ✅ {submitMessage}
+                  </div>
+                )}
+
+                {submitError && (
+                  <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">
+                    ⚠️ {submitError}
+                  </div>
+                )}
+
+                <form
+                  onSubmit={
+                    handleComplaintSubmit
+                  }
+                  className="space-y-5 rounded-2xl border bg-white p-5 shadow-sm sm:p-6"
+                >
+
+                  {/* TITLE */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Complaint Title *
+                    </label>
+
+                    <div className="flex gap-2">
+                      <input
+                        value={title}
+                        onChange={(e) =>
+                          setTitle(
+                            e.target.value
+                          )
+                        }
+                        placeholder="Example: Large pothole on main road"
+                        className="flex-1 rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          startVoiceInput(
+                            "title"
+                          )
+                        }
+                        className={`rounded-xl px-4 text-lg ${listeningField ===
+                          "title"
+                          ? "bg-red-500 text-white"
+                          : "bg-blue-50 text-blue-600"
+                          }`}
+                      >
+                        {listeningField ===
+                          "title"
+                          ? "⏹"
+                          : "🎤"}
+                      </button>
+                    </div>
+
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Type it or click 🎤 and
+                      speak.
+                    </p>
+                  </div>
+
+                  {/* DESCRIPTION */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Description *
+                    </label>
+
+                    <div className="flex gap-2">
+                      <textarea
+                        value={description}
+                        onChange={(e) =>
+                          setDescription(
+                            e.target.value
+                          )
+                        }
+                        rows={5}
+                        placeholder="Describe the problem..."
+                        className="flex-1 resize-none rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          startVoiceInput(
+                            "description"
+                          )
+                        }
+                        className={`h-12 rounded-xl px-4 text-lg ${listeningField ===
+                          "description"
+                          ? "bg-red-500 text-white"
+                          : "bg-blue-50 text-blue-600"
+                          }`}
+                      >
+                        {listeningField ===
+                          "description"
+                          ? "⏹"
+                          : "🎤"}
+                      </button>
+                    </div>
+
+                    <p className="mt-1 text-[11px] text-slate-400">
+                      Type or use voice input.
+                    </p>
+                  </div>
+
+                  {/* CATEGORY */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Category
+                    </label>
+
+                    <select
+                      value={category}
+                      onChange={(e) =>
+                        setCategory(
+                          e.target.value
+                        )
+                      }
+                      className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option>
+                        Road Damage
+                      </option>
+
+                      <option>
+                        Garbage
+                      </option>
+
+                      <option>
+                        Street Light
+                      </option>
+
+                      <option>
+                        Water Supply
+                      </option>
+
+                      <option>
+                        Drainage
+                      </option>
+
+                      <option>
+                        Traffic
+                      </option>
+
+                      <option>
+                        Other
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* IMAGE */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Problem Image
+                    </label>
+
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) =>
+                        setImage(
+                          e.target.files?.[0] ||
+                          null
+                        )
+                      }
+                      className="w-full rounded-xl border border-slate-300 p-3 text-sm"
+                    />
+
+                    {image && (
+                      <p className="mt-2 text-xs text-green-600">
+                        Selected:{" "}
+                        {image.name}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* LANDMARK */}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-bold">
+                      Landmark
+                    </label>
+
+                    <input
+                      value={landmark}
+                      onChange={(e) =>
+                        setLandmark(
+                          e.target.value
+                        )
+                      }
+                      placeholder="Example: Near college gate"
+                      className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  {/* LOCATION */}
+
+                  <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h4 className="font-extrabold text-blue-900">
+                          📍 Complaint Location
+                        </h4>
+
+                        <p className="mt-1 text-xs text-blue-700">
+                          Your location is
+                          detected automatically
+                          when this page opens.
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={
+                          detectLocation
+                        }
+                        disabled={
+                          locationLoading
+                        }
+                        className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-60"
+                      >
+                        {locationLoading
+                          ? "Detecting..."
+                          : "📍 Detect My Location"}
+                      </button>
+                    </div>
+
+                    {locationError && (
+                      <div className="mt-3 rounded-xl bg-red-50 p-3 text-xs font-semibold text-red-600">
+                        {locationError}
+                      </div>
+                    )}
+
+                    {/* INTERACTIVE MAP PICKER */}
+                    <LocationPicker
+                      latitude={latitude}
+                      longitude={longitude}
+                      onSelect={handleMapLocationSelect}
+                    />
+
+
+                    {latitude !== null &&
+                      longitude !==
+                      null && (
+                        <div className="mt-4 space-y-3">
+
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                Latitude
+                              </p>
+
+                              <p className="text-sm font-bold">
+                                {latitude}
+                              </p>
+                            </div>
+
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                Longitude
+                              </p>
+
+                              <p className="text-sm font-bold">
+                                {longitude}
+                              </p>
+                            </div>
                           </div>
 
-                          {expanded && (
-                            <div className="border-t bg-slate-50 p-5">
+                          <div className="rounded-xl bg-white p-3">
+                            <p className="text-[10px] text-slate-400">
+                              Address
+                            </p>
 
-                              {imageUrl && (
-                                <div className="mb-5">
-                                  <p className="mb-2 text-xs font-bold text-slate-500">
-                                    Complaint Image
-                                  </p>
+                            <p className="mt-1 text-sm font-semibold">
+                              {address ||
+                                "Address not available"}
+                            </p>
+                          </div>
 
-                                  <img
-                                    src={
-                                      imageUrl
-                                    }
-                                    alt="Complaint"
-                                    className="max-h-80 w-full rounded-xl object-cover sm:w-96"
-                                    onError={(
-                                      e
-                                    ) => {
-                                      e.currentTarget.style.display =
-                                        "none";
-                                    }}
-                                  />
-                                </div>
-                              )}
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                Road
+                              </p>
 
-                              <div className="grid gap-3 sm:grid-cols-2">
+                              <p className="text-xs font-bold">
+                                {road ||
+                                  "Not available"}
+                              </p>
+                            </div>
 
-                                <div className="rounded-xl bg-white p-4">
-                                  <p className="text-[10px] text-slate-400">
-                                    Location
-                                  </p>
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                City
+                              </p>
 
-                                  <p className="mt-1 text-sm font-semibold">
-                                    {complaint.address ||
-                                      [
-                                        complaint.road,
-                                        complaint.city,
-                                        complaint.state,
-                                      ]
-                                        .filter(
-                                          Boolean
-                                        )
-                                        .join(
-                                          ", "
-                                        ) ||
-                                      "Location not available"}
-                                  </p>
-                                </div>
+                              <p className="text-xs font-bold">
+                                {city ||
+                                  "Not available"}
+                              </p>
+                            </div>
 
-                                <div className="rounded-xl bg-white p-4">
-                                  <p className="text-[10px] text-slate-400">
-                                    Coordinates
-                                  </p>
+                            <div className="rounded-xl bg-white p-3">
+                              <p className="text-[10px] text-slate-400">
+                                State
+                              </p>
 
-                                  <p className="mt-1 text-sm font-semibold">
-                                    {complaint.latitude !==
-                                      null &&
-                                    complaint.latitude !==
-                                      undefined
-                                      ? `${complaint.latitude}, ${complaint.longitude}`
-                                      : "Not available"}
-                                  </p>
-                                </div>
+                              <p className="text-xs font-bold">
+                                {state ||
+                                  "Not available"}
+                              </p>
+                            </div>
+                          </div>
 
-                                <div className="rounded-xl bg-white p-4">
-                                  <p className="text-[10px] text-slate-400">
-                                    AI Potholes
-                                  </p>
+                          {roadDistance !==
+                            null && (
+                              <p className="text-xs text-blue-700">
+                                Road distance:
+                                {" "}
+                                {roadDistance}
+                                {" "}
+                                meters
+                              </p>
+                            )}
 
-                                  <p className="mt-1 text-sm font-bold">
+                          <a
+                            href={`https://www.google.com/maps?q=${latitude},${longitude}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-block text-xs font-bold text-blue-600 underline"
+                          >
+                            Open location in
+                            Google Maps →
+                          </a>
+                        </div>
+                      )}
+                  </div>
+
+                  {/* SUBMIT */}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="w-full rounded-xl bg-blue-600 px-5 py-4 text-sm font-extrabold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {submitting
+                      ? "Submitting Complaint..."
+                      : "🚀 Submit Complaint"}
+                  </button>
+
+                </form>
+              </div>
+            )}
+
+          {/* =================================================
+              COMPLAINTS
+          ================================================= */}
+
+          {activeSection ===
+            "complaints" && (
+              <div>
+
+                <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-2xl font-extrabold">
+                      My Complaints
+                    </h3>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Track all your submitted
+                      complaints.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setLoading(true);
+                      await fetchComplaints();
+                      setLoading(false);
+                    }}
+                    className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+
+                {complaints.length ===
+                  0 ? (
+                  <div className="rounded-2xl border bg-white p-10 text-center shadow-sm">
+                    <p className="text-4xl">
+                      📋
+                    </p>
+
+                    <h4 className="mt-3 font-extrabold">
+                      No complaints yet
+                    </h4>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Submit your first civic
+                      complaint.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        changeSection(
+                          "submit"
+                        )
+                      }
+                      className="mt-5 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white"
+                    >
+                      Submit Complaint
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {complaints.map(
+                      (complaint) => {
+                        const imageUrl =
+                          getImageUrl(
+                            complaint.image_url
+                          );
+
+                        const expanded =
+                          expandedId ===
+                          complaint.id;
+
+                        return (
+                          <div
+                            key={
+                              complaint.id
+                            }
+                            className="overflow-hidden rounded-2xl border bg-white shadow-sm"
+                          >
+
+                            <div className="p-5">
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+
+                                <div>
+                                  <p className="text-xs font-bold text-slate-400">
+                                    Complaint #
                                     {
-                                      complaint.pothole_count ??
-                                      0
+                                      complaint.id
+                                    }
+                                  </p>
+
+                                  <h4 className="mt-1 text-lg font-extrabold">
+                                    {
+                                      complaint.title
+                                    }
+                                  </h4>
+
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    {formatDate(
+                                      complaint.created_at
+                                    )}
+                                  </p>
+                                </div>
+
+                                <span
+                                  className={`w-fit rounded-full px-3 py-1.5 text-xs font-bold ${statusClass(
+                                    complaint.status
+                                  )}`}
+                                >
+                                  {formatStatus(
+                                    complaint.status
+                                  )}
+                                </span>
+                              </div>
+
+                              <p className="mt-4 text-sm leading-6 text-slate-600">
+                                {
+                                  complaint.description
+                                }
+                              </p>
+
+                              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+
+                                <div className="rounded-xl bg-slate-50 p-3">
+                                  <p className="text-[10px] text-slate-400">
+                                    Category
+                                  </p>
+
+                                  <p className="mt-1 text-xs font-bold">
+                                    {
+                                      complaint.category ||
+                                      "Not assigned"
                                     }
                                   </p>
                                 </div>
 
-                                <div className="rounded-xl bg-white p-4">
+                                <div className="rounded-xl bg-slate-50 p-3">
                                   <p className="text-[10px] text-slate-400">
-                                    AI Confidence
+                                    Priority
                                   </p>
 
-                                  <p className="mt-1 text-sm font-bold">
-                                    {complaint.ai_confidence !==
-                                    null &&
-                                    complaint.ai_confidence !==
-                                      undefined
-                                      ? `${(
+                                  <p className="mt-1 text-xs font-bold">
+                                    {
+                                      complaint.priority ||
+                                      "Not assigned"
+                                    }
+                                  </p>
+                                </div>
+
+                                <div className="rounded-xl bg-slate-50 p-3">
+                                  <p className="text-[10px] text-slate-400">
+                                    Department
+                                  </p>
+
+                                  <p className="mt-1 text-xs font-bold">
+                                    {
+                                      complaint.department ||
+                                      "Not assigned"
+                                    }
+                                  </p>
+                                </div>
+
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedId(
+                                    expanded
+                                      ? null
+                                      : complaint.id
+                                  )
+                                }
+                                className="mt-4 text-xs font-bold text-blue-600"
+                              >
+                                {expanded
+                                  ? "Hide Details ↑"
+                                  : "View Details ↓"}
+                              </button>
+                            </div>
+
+                            {expanded && (
+                              <div className="border-t bg-slate-50 p-5">
+
+                                {imageUrl && (
+                                  <div className="mb-5">
+                                    <p className="mb-2 text-xs font-bold text-slate-500">
+                                      Complaint Image
+                                    </p>
+
+                                    <img
+                                      src={
+                                        imageUrl
+                                      }
+                                      alt="Complaint"
+                                      className="max-h-80 w-full rounded-xl object-cover sm:w-96"
+                                      onError={(
+                                        e
+                                      ) => {
+                                        e.currentTarget.style.display =
+                                          "none";
+                                      }}
+                                    />
+                                  </div>
+                                )}
+
+                                <div className="grid gap-3 sm:grid-cols-2">
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      Location
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-semibold">
+                                      {complaint.address ||
+                                        [
+                                          complaint.road,
+                                          complaint.city,
+                                          complaint.state,
+                                        ]
+                                          .filter(
+                                            Boolean
+                                          )
+                                          .join(
+                                            ", "
+                                          ) ||
+                                        "Location not available"}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      Coordinates
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-semibold">
+                                      {complaint.latitude !==
+                                        null &&
+                                        complaint.latitude !==
+                                        undefined
+                                        ? `${complaint.latitude}, ${complaint.longitude}`
+                                        : "Not available"}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      AI Potholes
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-bold">
+                                      {
+                                        complaint.pothole_count ??
+                                        0
+                                      }
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-xl bg-white p-4">
+                                    <p className="text-[10px] text-slate-400">
+                                      AI Confidence
+                                    </p>
+
+                                    <p className="mt-1 text-sm font-bold">
+                                      {complaint.ai_confidence !==
+                                        null &&
+                                        complaint.ai_confidence !==
+                                        undefined
+                                        ? `${(
                                           complaint.ai_confidence *
                                           100
                                         ).toFixed(
                                           1
                                         )}%`
-                                      : "Not available"}
-                                  </p>
+                                        : "Not available"}
+                                    </p>
+                                  </div>
+
                                 </div>
 
-                              </div>
-
-                              {complaint.latitude !==
-                                null &&
-                                complaint.latitude !==
-                                  undefined &&
-                                complaint.longitude !==
+                                {complaint.latitude !==
                                   null &&
-                                complaint.longitude !==
+                                  complaint.latitude !==
+                                  undefined &&
+                                  complaint.longitude !==
+                                  null &&
+                                  complaint.longitude !==
                                   undefined && (
-                                  <a
-                                    href={`https://www.google.com/maps?q=${complaint.latitude},${complaint.longitude}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="mt-4 inline-block text-xs font-bold text-blue-600 underline"
-                                  >
-                                    📍 Open Complaint
-                                    Location
-                                  </a>
+                                    <a
+                                      href={`https://www.google.com/maps?q=${complaint.latitude},${complaint.longitude}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="mt-4 inline-block text-xs font-bold text-blue-600 underline"
+                                    >
+                                      📍 Open Complaint
+                                      Location
+                                    </a>
+                                  )}
+
+                                {complaint.action_taken && (
+                                  <div className="mt-4 rounded-xl bg-green-50 p-4">
+                                    <p className="text-xs font-bold text-green-700">
+                                      Action Taken
+                                    </p>
+
+                                    <p className="mt-1 text-sm text-green-800">
+                                      {
+                                        complaint.action_taken
+                                      }
+                                    </p>
+                                  </div>
                                 )}
 
-                              {complaint.action_taken && (
-                                <div className="mt-4 rounded-xl bg-green-50 p-4">
-                                  <p className="text-xs font-bold text-green-700">
-                                    Action Taken
-                                  </p>
+                                {complaint.rejection_reason && (
+                                  <div className="mt-4 rounded-xl bg-red-50 p-4">
+                                    <p className="text-xs font-bold text-red-700">Rejection Reason</p>
+                                    <p className="mt-1 text-sm text-red-800">{complaint.rejection_reason}</p>
+                                  </div>
+                                )}
 
-                                  <p className="mt-1 text-sm text-green-800">
-                                    {
-                                      complaint.action_taken
-                                    }
-                                  </p>
-                                </div>
-                              )}
+                                {/* GOVERNMENT WORKFLOW / CITIZEN TRACKING */}
+                                <section className="mt-5 rounded-2xl border border-blue-100 bg-white p-4 sm:p-5">
+                                  <div className="flex items-start gap-3">
+                                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-xl">🧭</span>
+                                    <div>
+                                      <h4 className="text-sm font-extrabold text-slate-800">Government Workflow</h4>
+                                      <p className="mt-1 text-xs text-slate-500">Track the official progress of your complaint.</p>
+                                    </div>
+                                  </div>
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                    {[
+                                      ["Submitted", complaint.created_at, true],
+                                      ["Verified", complaint.verified_at, ["verified", "assigned", "in_progress", "action_taken", "resolved"].includes((complaint.status || "").toLowerCase())],
+                                      ["Department assigned", complaint.department_assigned_at, !!complaint.department],
+                                      ["Officer assigned", complaint.officer_assigned_at, !!complaint.assigned_to],
+                                      ["Work in progress", complaint.in_progress_at, (complaint.status || "").toLowerCase() === "in_progress" || !!complaint.in_progress_at],
+                                      ["Action taken", complaint.action_taken_at, (complaint.status || "").toLowerCase() === "action_taken" || !!complaint.action_taken_at],
+                                      ["Resolved", complaint.resolved_at, (complaint.status || "").toLowerCase() === "resolved" || !!complaint.resolved_at],
+                                    ].map(([label, date, done]) => (
+                                      <div key={String(label)} className="flex items-start gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                                        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-extrabold ${done ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"}`}>{done ? "✓" : "—"}</span>
+                                        <div className="min-w-0"><p className="text-xs font-bold text-slate-700">{label}</p><p className="mt-1 text-xs text-slate-500">{date ? formatDate(String(date)) : "Not recorded yet"}</p></div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                    <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-500">Current department</p><p className="mt-1 text-sm font-semibold text-slate-800">{complaint.department || "Not assigned yet"}</p></div>
+                                    <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs font-bold text-slate-500">Latest action</p><p className="mt-1 text-sm font-semibold text-slate-800">{complaint.action_taken || "No action update recorded yet"}</p></div>
+                                  </div>
+                                  {(complaint.status || "").toLowerCase() === "rejected" && <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm font-semibold text-red-700">This complaint was rejected. See the rejection reason above.</p>}
+                                </section>
 
-                              {complaint.rejection_reason && (
-                                <div className="mt-4 rounded-xl bg-red-50 p-4">
-                                  <p className="text-xs font-bold text-red-700">
-                                    Rejection Reason
-                                  </p>
+                                {/* CITIZEN FEEDBACK */}
+                                <section className="mt-5 rounded-2xl border border-amber-100 bg-white p-4 sm:p-5">
+                                  <h4 className="text-sm font-extrabold text-slate-800">Your Feedback</h4>
+                                  {complaint.feedback && complaint.feedback.length > 0 ? (
+                                    <div className="mt-3 rounded-xl bg-emerald-50 p-4">
+                                      <p className="text-lg tracking-widest text-amber-500">{"★".repeat(complaint.feedback[0].rating)}<span className="text-slate-300">{"★".repeat(5 - complaint.feedback[0].rating)}</span></p>
+                                      <p className="mt-1 text-sm font-bold text-emerald-800">Feedback submitted</p>
+                                      <p className="mt-2 text-sm text-slate-700">{complaint.feedback[0].comment || "No written comment added."}</p>
+                                      <p className="mt-2 text-xs text-slate-500">{formatDate(complaint.feedback[0].created_at)}</p>
+                                    </div>
+                                  ) : (complaint.status || "").toLowerCase() === "resolved" ? (
+                                    <div className="mt-3 space-y-3">
+                                      <p className="text-sm text-slate-600">Your complaint is resolved. Rate the resolution and share a comment.</p>
+                                      <div><label className="mb-2 block text-xs font-bold text-slate-600">Rating</label><div className="flex gap-2">{[1,2,3,4,5].map((rating) => <button key={rating} type="button" aria-label={`${rating} star${rating > 1 ? "s" : ""}`} onClick={() => setFeedbackDrafts((prev) => ({ ...prev, [complaint.id]: { rating, comment: prev[complaint.id]?.comment || "" } }))} className={`text-3xl ${(feedbackDrafts[complaint.id]?.rating ?? 5) >= rating ? "text-amber-400" : "text-slate-300"}`}>★</button>)}</div></div>
+                                      <textarea value={feedbackDrafts[complaint.id]?.comment || ""} onChange={(e) => setFeedbackDrafts((prev) => ({ ...prev, [complaint.id]: { rating: prev[complaint.id]?.rating ?? 5, comment: e.target.value } }))} rows={3} maxLength={1000} placeholder="Share your experience (optional)" className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-blue-400" />
+                                      {feedbackMessages[complaint.id] && <p className={`text-sm ${feedbackMessages[complaint.id].type === "error" ? "text-red-600" : "text-emerald-700"}`}>{feedbackMessages[complaint.id].text}</p>}
+                                      <button type="button" disabled={feedbackSubmittingId === complaint.id} onClick={() => submitFeedback(complaint)} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-60">{feedbackSubmittingId === complaint.id ? "Submitting..." : "Submit Feedback"}</button>
+                                    </div>
+                                  ) : <p className="mt-2 text-sm text-slate-500">Feedback will be available after the complaint is marked Resolved.</p>}
+                                </section>
 
-                                  <p className="mt-1 text-sm text-red-800">
-                                    {
-                                      complaint.rejection_reason
-                                    }
-                                  </p>
-                                </div>
-                              )}
+                              </div>
+                            )}
 
-                            </div>
-                          )}
-
-                        </div>
-                      );
-                    }
-                  )}
-                </div>
-              )}
-            </div>
-          )}
+                          </div>
+                        );
+                      }
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
           {/* =================================================
               NOTIFICATIONS
@@ -2195,80 +2379,79 @@ export default function CitizenDashboard() {
 
           {activeSection ===
             "notifications" && (
-            <div>
+              <div>
 
-              <div className="mb-5">
-                <h3 className="text-2xl font-extrabold">
-                  Notifications
-                </h3>
+                <div className="mb-5">
+                  <h3 className="text-2xl font-extrabold">
+                    Notifications
+                  </h3>
 
-                <p className="mt-1 text-sm text-slate-500">
-                  Updates about your complaints.
-                </p>
-              </div>
-
-              {notifications.length ===
-              0 ? (
-                <div className="rounded-2xl border bg-white p-10 text-center">
-                  <p className="text-4xl">
-                    🔔
-                  </p>
-
-                  <p className="mt-3 font-bold">
-                    No notifications
+                  <p className="mt-1 text-sm text-slate-500">
+                    Updates about your complaints.
                   </p>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {notifications.map(
-                    (notification) => (
-                      <button
-                        key={
-                          notification.id
-                        }
-                        type="button"
-                        onClick={() =>
-                          !notification.is_read &&
-                          markNotificationAsRead(
+
+                {notifications.length ===
+                  0 ? (
+                  <div className="rounded-2xl border bg-white p-10 text-center">
+                    <p className="text-4xl">
+                      🔔
+                    </p>
+
+                    <p className="mt-3 font-bold">
+                      No notifications
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {notifications.map(
+                      (notification) => (
+                        <button
+                          key={
                             notification.id
-                          )
-                        }
-                        className={`w-full rounded-2xl border p-4 text-left ${
-                          notification.is_read
+                          }
+                          type="button"
+                          onClick={() =>
+                            !notification.is_read &&
+                            markNotificationAsRead(
+                              notification.id
+                            )
+                          }
+                          className={`w-full rounded-2xl border p-4 text-left ${notification.is_read
                             ? "bg-white"
                             : "border-blue-200 bg-blue-50"
-                        }`}
-                      >
-                        <div className="flex gap-3">
+                            }`}
+                        >
+                          <div className="flex gap-3">
 
-                          <div className="text-xl">
-                            {notification.is_read
-                              ? "🔔"
-                              : "🔵"}
+                            <div className="text-xl">
+                              {notification.is_read
+                                ? "🔔"
+                                : "🔵"}
+                            </div>
+
+                            <div className="flex-1">
+                              <p className="text-sm font-semibold">
+                                {
+                                  notification.message
+                                }
+                              </p>
+
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                {formatDate(
+                                  notification.created_at
+                                )}
+                              </p>
+                            </div>
+
                           </div>
-
-                          <div className="flex-1">
-                            <p className="text-sm font-semibold">
-                              {
-                                notification.message
-                              }
-                            </p>
-
-                            <p className="mt-1 text-[11px] text-slate-400">
-                              {formatDate(
-                                notification.created_at
-                              )}
-                            </p>
-                          </div>
-
-                        </div>
-                      </button>
-                    )
-                  )}
-                </div>
-              )}
-            </div>
-          )}
+                        </button>
+                      )
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
           {/* =================================================
               PROFILE
@@ -2276,73 +2459,73 @@ export default function CitizenDashboard() {
 
           {activeSection ===
             "profile" && (
-            <div className="mx-auto max-w-2xl">
+              <div className="mx-auto max-w-2xl">
 
-              <h3 className="text-2xl font-extrabold">
-                My Profile
-              </h3>
+                <h3 className="text-2xl font-extrabold">
+                  My Profile
+                </h3>
 
-              <p className="mt-1 text-sm text-slate-500">
-                Your CivicPulse account details.
-              </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  Your CivicPulse account details.
+                </p>
 
-              <div className="mt-5 rounded-2xl border bg-white p-6 shadow-sm">
+                <div className="mt-5 rounded-2xl border bg-white p-6 shadow-sm">
 
-                <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-blue-100 text-3xl">
-                  👤
+                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-blue-100 text-3xl">
+                    👤
+                  </div>
+
+                  <div className="mt-6 space-y-4">
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        User ID
+                      </p>
+
+                      <p className="mt-1 font-bold">
+                        {user?.id ||
+                          "Not available"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        Name
+                      </p>
+
+                      <p className="mt-1 font-bold">
+                        {user?.name ||
+                          "Not available"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        Email
+                      </p>
+
+                      <p className="mt-1 font-bold">
+                        {user?.email ||
+                          "Not available"}
+                      </p>
+                    </div>
+
+                    <div className="rounded-xl bg-slate-50 p-4">
+                      <p className="text-[10px] text-slate-400">
+                        Role
+                      </p>
+
+                      <p className="mt-1 font-bold capitalize">
+                        {user?.role ||
+                          "citizen"}
+                      </p>
+                    </div>
+
+                  </div>
+
                 </div>
-
-                <div className="mt-6 space-y-4">
-
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-[10px] text-slate-400">
-                      User ID
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {user?.id ||
-                        "Not available"}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-[10px] text-slate-400">
-                      Name
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {user?.name ||
-                        "Not available"}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-[10px] text-slate-400">
-                      Email
-                    </p>
-
-                    <p className="mt-1 font-bold">
-                      {user?.email ||
-                        "Not available"}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-[10px] text-slate-400">
-                      Role
-                    </p>
-
-                    <p className="mt-1 font-bold capitalize">
-                      {user?.role ||
-                        "citizen"}
-                    </p>
-                  </div>
-
-                </div>
-
               </div>
-            </div>
-          )}
+            )}
 
         </div>
       </main>

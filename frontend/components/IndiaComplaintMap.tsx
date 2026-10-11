@@ -139,7 +139,7 @@ export default function IndiaComplaintMap({
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
-      <div className="relative h-[520px] w-full">
+      <div className="relative z-0 h-[520px] w-full isolate">
         <MapContainer
           key="india-civic-complaint-map"
           center={INDIA_CENTER}

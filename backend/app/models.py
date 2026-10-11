@@ -62,6 +62,11 @@ class User(Base):
         String,
         nullable=True
     )
+    
+    profile_picture = Column(
+    String,
+    nullable=True
+    )
 
     password = Column(
         String,

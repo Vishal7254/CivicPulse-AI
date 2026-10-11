@@ -909,7 +909,34 @@ def get_users(
 
     return result
 
-    # =========================
+    
+# =========================
+# GET CURRENT USER PROFILE
+# =========================
+
+@app.get("/users/me")
+def get_my_profile(
+    current_user=Depends(get_current_user),
+):
+    if current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+        )
+
+    return {
+        "id": current_user.id,
+        "name": current_user.name,
+        "email": current_user.email,
+        "phone": current_user.phone,
+        "role": current_user.role,
+        "city": current_user.city,
+        "address": current_user.address,
+        "profile_picture": current_user.profile_picture,
+    }
+
+
+# =========================
 # UPDATE USER
 # =========================
 
@@ -917,18 +944,18 @@ def get_users(
 def update_user(
     user_id: int,
     user_data: dict,
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
     if current_user is None:
         raise HTTPException(
             status_code=401,
-            detail="Unauthorized"
+            detail="Unauthorized",
         )
 
     if current_user.role != "admin" and current_user.id != user_id:
         raise HTTPException(
             status_code=403,
-            detail="You can only update your own profile"
+            detail="You can only update your own profile",
         )
 
     db = SessionLocal()
@@ -943,7 +970,7 @@ def update_user(
         if user is None:
             raise HTTPException(
                 status_code=404,
-                detail="User not found"
+                detail="User not found",
             )
 
         user.name = user_data.get("name", user.name)
@@ -963,8 +990,9 @@ def update_user(
                 "phone": user.phone,
                 "role": user.role,
                 "city": user.city,
-                "address": user.address
-            }
+                "address": user.address,
+                "profile_picture": user.profile_picture,
+            },
         }
 
     except HTTPException:
@@ -975,13 +1003,11 @@ def update_user(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail="Unable to update user."
+            detail="Unable to update user.",
         )
 
     finally:
         db.close()
-
-
 # =========================
 # DELETE USER
 # =========================
@@ -1425,11 +1451,50 @@ async def create_complaint(
             else None
         )
     )
+    # =========================
+    # SAVE COMPLAINT + NOTIFICATIONS
+    # =========================
 
     db.add(complaint)
+    db.flush()
+
+    # 1. Notify the citizen who submitted the complaint
+    create_notification(
+        db=db,
+        user_id=current_user.id,
+        complaint_id=complaint.id,
+        message=(
+            f"Your complaint #{complaint.id} has been submitted "
+            "successfully and is pending review."
+        ),
+        notification_type="complaint_submitted",
+    )
+
+    # 2. Notify all administrators about the new complaint
+    admin_users = (
+        db.query(models.User)
+        .filter(models.User.role == "admin")
+        .all()
+    )
+    
+
+    for admin in admin_users:
+        # Avoid sending the same notification to the same user
+        if admin.id == current_user.id:
+            continue
+
+        create_notification(
+            db=db,
+            user_id=admin.id,
+            complaint_id=complaint.id,
+            message=(
+                f"New complaint #{complaint.id} submitted: "
+                f"{complaint.title}. Please review it."
+            ),
+            notification_type="new_complaint",
+        )
 
     db.commit()
-
     db.refresh(complaint)
 
     return {
@@ -1442,7 +1507,7 @@ async def create_complaint(
         "ai_detection_type": complaint.ai_detection_type,
         "ai_detection_count": complaint.ai_detection_count,
         "pothole_count": complaint.pothole_count,
-        "ai_confidence": complaint.ai_confidence
+        "ai_confidence": complaint.ai_confidence,
     }
 
 # =========================
@@ -2922,18 +2987,64 @@ def get_my_notifications(
 # MARK NOTIFICATION AS READ
 # =========================
 
+
+# =========================
+# MARK NOTIFICATION AS READ
+# =========================
+
 @app.patch("/notifications/{notification_id}/read")
 def mark_notification_read(
     notification_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    notification = (
+        db.query(models.Notification)
+        .filter(
+            models.Notification.id == notification_id,
+            models.Notification.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if notification is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Notification not found",
+        )
+
+    notification.is_read = True
+    db.commit()
+    db.refresh(notification)
 
     return {
         "message": "Notification marked as read",
         "notification_id": notification.id,
         "is_read": notification.is_read,
     }
+
+
+# =========================
+# MARK ALL NOTIFICATIONS AS READ
+# =========================
+
+@app.patch("/notifications/read-all")
+def mark_all_notifications_read(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    db.query(models.Notification).filter(
+        models.Notification.user_id == current_user.id,
+        models.Notification.is_read == False,
+    ).update(
+        {models.Notification.is_read: True},
+        synchronize_session=False,
+    )
+
+    db.commit()
+
+    return {"message": "All notifications marked as read"}
+
     # =========================
 # SUBMIT FEEDBACK
 # =========================
